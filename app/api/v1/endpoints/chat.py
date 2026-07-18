@@ -10,12 +10,14 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import FinanceOrchestrator
-from app.core.dependencies import SettingsDep
+from app.core.dependencies import DbDep, SettingsDep, get_db, get_qbo_client_for_realm
 from app.core.logging import get_logger
 from app.core.security import verify_api_key
 from app.models.schemas import ChatRequest, ChatResponse
+from app.tools.qbo_tools import build_qbo_tools
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 logger = get_logger(__name__)
@@ -42,6 +44,7 @@ def set_orchestrator(orch: FinanceOrchestrator) -> None:
 async def chat(
     request: ChatRequest,
     _: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> ChatResponse:
     """
     Send a message to the Finance Operations AI Manager.
@@ -50,9 +53,16 @@ async def chat(
     - **orchestrator** mode: auto-detects the right module
     - Specify **module** to force a specific agent
     """
-    orch = get_orchestrator()
-    import json
     from datetime import datetime, timezone
+    orch = get_orchestrator()
+
+    # Load QBO tools from DB if realm_id provided
+    qbo_tools = []
+    if request.qbo_realm_id:
+        qbo_client = await get_qbo_client_for_realm(request.qbo_realm_id, db)
+        if qbo_client:
+            qbo_tools = build_qbo_tools(qbo_client)
+            orch.update_qbo_tools(qbo_tools)
 
     try:
         result = await orch.invoke(
@@ -78,6 +88,7 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     _: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
     Stream tokens from the Finance Operations AI Manager via Server-Sent Events.
@@ -89,6 +100,12 @@ async def chat_stream(
     - `{"type": "error", "detail": "<msg>"}` — error occurred
     """
     orch = get_orchestrator()
+
+    # Load QBO tools from DB if realm_id provided
+    if request.qbo_realm_id:
+        qbo_client = await get_qbo_client_for_realm(request.qbo_realm_id, db)
+        if qbo_client:
+            orch.update_qbo_tools(build_qbo_tools(qbo_client))
 
     async def event_stream() -> AsyncIterator[str]:
         try:
