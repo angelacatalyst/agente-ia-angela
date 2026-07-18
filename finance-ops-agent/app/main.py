@@ -12,7 +12,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTML Response
 
 from app.agents.orchestrator import FinanceOrchestrator
 from app.api.v1.endpoints.chat import set_orchestrator
@@ -130,6 +130,10 @@ async def health() -> HealthResponse:
         services=services,
     )
 
+# ── Chat UI ───────────────────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def chat_ui() -> HTMLResponse:
+    return HTMLResponse(open("app/static/index.html").read())
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
