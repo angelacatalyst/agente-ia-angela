@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     grants,
     integrations,
     payments,
+    qbo_data,
     sops,
     transactions,
     vendors,
@@ -27,3 +28,4 @@ api_router.include_router(sops.router)
 api_router.include_router(eod.router)
 api_router.include_router(controller.router)
 api_router.include_router(integrations.router)
+api_router.include_router(qbo_data.router)

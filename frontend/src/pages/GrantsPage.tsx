@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useI18n } from '@/lib/i18n'
+import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
@@ -36,6 +37,7 @@ function pct(spent: number, budget: number) {
 
 export function GrantsPage() {
   const { t } = useI18n()
+  const { selectedRealmId } = useAppStore()
   const [selected, setSelected] = useState<Grant | null>(null)
   const [result, setResult] = useState<string | null>(null)
 
@@ -43,6 +45,7 @@ export function GrantsPage() {
     mutationFn: () => api.chat({
       message: `Review grant compliance for: ${selected?.name ?? 'all grants'}. Budget: $${selected?.budget}, Spent: $${selected?.spent}`,
       module: 'grant_compliance',
+      qbo_realm_id: selectedRealmId ?? undefined,
     }),
     onSuccess: (d) => setResult(d.content),
   })

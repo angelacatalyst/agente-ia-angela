@@ -176,6 +176,17 @@ export const api = {
       }).then(r => r.data),
   },
 
+  qboData: {
+    dashboard: (realmId: string) =>
+      apiClient.get<QBODashboard>('/qbo/data/dashboard', { params: { realm_id: realmId } }).then(r => r.data),
+    vendors: (realmId: string) =>
+      apiClient.get<{ vendors: QBOVendor[]; total: number }>('/qbo/data/vendors', { params: { realm_id: realmId } }).then(r => r.data),
+    bills: (realmId: string, unpaidOnly = true) =>
+      apiClient.get<{ bills: QBOBill[]; total: number }>('/qbo/data/bills', { params: { realm_id: realmId, unpaid_only: unpaidOnly } }).then(r => r.data),
+    transactions: (realmId: string) =>
+      apiClient.get<{ transactions: QBOTransaction[]; total: number }>('/qbo/data/transactions', { params: { realm_id: realmId } }).then(r => r.data),
+  },
+
   integrations: {
     qboStatus: (realmId: string) =>
       apiClient.get('/integrations/qbo/status', { params: { realm_id: realmId } }).then(r => r.data),
@@ -194,4 +205,60 @@ export interface QBOCompany {
   connected: boolean
   token_expired: boolean
   expires_at: string
+}
+
+// ── QBO Data types ────────────────────────────────────────────────────────────
+
+export interface QBOKpi {
+  label: string
+  value: string
+  raw: number | null
+  source: string
+}
+
+export interface QBOAlert {
+  level: 'high' | 'medium' | 'low'
+  text: string
+}
+
+export interface QBODashboard {
+  kpis: QBOKpi[]
+  alerts: QBOAlert[]
+  priorities: string[]
+  errors: string[]
+  fetched_at: string
+}
+
+export interface QBOVendor {
+  id: string
+  name: string
+  email: string
+  phone: string
+  balance: number
+  balance_formatted: string
+  active: boolean
+  vendor_1099: boolean
+  currency: string
+}
+
+export interface QBOBill {
+  id: string
+  vendor: string
+  amount: number
+  amount_formatted: string
+  balance: number
+  balance_formatted: string
+  due_date: string
+  txn_date: string
+  status: 'pending' | 'overdue'
+  doc_number: string
+}
+
+export interface QBOTransaction {
+  date: string
+  payee: string
+  amount: string
+  type: string
+  status: string
+  doc_number: string
 }

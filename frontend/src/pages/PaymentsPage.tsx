@@ -1,34 +1,30 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useMutation } from '@tanstack/react-query'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useI18n } from '@/lib/i18n'
-import { api } from '@/lib/api'
+import { useAppStore } from '@/stores/appStore'
+import { api, type QBOBill } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   CreditCard, UploadCloud, FileText, Loader2, Plus,
-  CheckCircle2, Clock, X, Download,
+  CheckCircle2, Clock, X, Download, RefreshCw, AlertCircle,
 } from 'lucide-react'
-
-interface PaymentRequest {
-  id: string; vendor: string; amount: string; category: string
-  status: 'pending' | 'approved' | 'rejected'; date: string
-}
-
-const SAMPLE_REQUESTS: PaymentRequest[] = [
-  { id: 'PR-001', vendor: 'Office Depot',       amount: '$1,240.00', category: 'Office Supplies', status: 'approved', date: '2024-04-01' },
-  { id: 'PR-002', vendor: 'Consulting Partners', amount: '$8,500.00', category: 'Professional Fees', status: 'pending', date: '2024-04-03' },
-  { id: 'PR-003', vendor: 'DataSoft LLC',        amount: '$3,200.00', category: 'Software',        status: 'pending', date: '2024-04-05' },
-]
 
 const statusStyle: Record<string, string> = {
   pending:  'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+  overdue:  'bg-red-50 text-red-700 ring-1 ring-red-200',
   approved: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
-  rejected: 'bg-red-50 text-red-700 ring-1 ring-red-200',
 }
 
 export function PaymentsPage() {
   const { t } = useI18n()
+  const { selectedRealmId } = useAppStore()
+
+  const [bills, setBills] = useState<QBOBill[]>([])
+  const [loadingBills, setLoadingBills] = useState(false)
+  const [billsError, setBillsError] = useState<string | null>(null)
+
   const [vendor, setVendor] = useState('')
   const [amount, setAmount] = useState('')
   const [category, setCategory] = useState('')
@@ -36,10 +32,27 @@ export function PaymentsPage() {
   const [file, setFile] = useState<File | null>(null)
   const [result, setResult] = useState<string | null>(null)
 
+  const fetchBills = useCallback(async () => {
+    if (!selectedRealmId) return
+    setLoadingBills(true)
+    setBillsError(null)
+    try {
+      const data = await api.qboData.bills(selectedRealmId, true)
+      setBills(data.bills)
+    } catch (e: any) {
+      setBillsError(e?.response?.data?.detail || 'Failed to load bills')
+    } finally {
+      setLoadingBills(false)
+    }
+  }, [selectedRealmId])
+
+  useEffect(() => { fetchBills() }, [fetchBills])
+
   const mutation = useMutation({
     mutationFn: () => api.chat({
       message: `Generate payment request: Vendor=${vendor}, Amount=${amount}, Category=${category}, Notes=${notes}`,
       module: 'payment_request',
+      qbo_realm_id: selectedRealmId ?? undefined,
     }),
     onSuccess: (d) => setResult(d.content),
   })
@@ -62,9 +75,15 @@ export function PaymentsPage() {
         subtitle={t('page.payments.subtitle')}
         badge="AI"
         actions={
-          <button className="btn-primary text-[13px]">
-            <Plus size={14} /> New Request
-          </button>
+          <>
+            <button onClick={fetchBills} disabled={loadingBills} className="btn-ghost text-[13px] gap-1.5">
+              <RefreshCw size={14} className={loadingBills ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+            <button className="btn-primary text-[13px]">
+              <Plus size={14} /> New Request
+            </button>
+          </>
         }
       />
 
@@ -149,28 +168,58 @@ export function PaymentsPage() {
             )}
           </div>
 
-          {/* Queue */}
+          {/* QBO Bills Queue */}
           <div className="card p-5">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-surface-900">Request Queue</h2>
+              <h2 className="text-sm font-semibold text-surface-900">
+                Unpaid Bills — QBO
+                {bills.length > 0 && (
+                  <span className="ml-2 text-[11px] font-normal text-surface-400">({bills.length})</span>
+                )}
+              </h2>
               <button className="btn-ghost text-[13px]">
                 <Download size={13} /> {t('common.export')}
               </button>
             </div>
-            <div className="space-y-2">
-              {SAMPLE_REQUESTS.map(r => (
-                <div key={r.id} className="rounded-xl border border-surface-200 p-4 hover:border-surface-300 transition-all">
+
+            {!selectedRealmId && (
+              <p className="text-sm text-surface-400 text-center py-6">Select a company to load bills.</p>
+            )}
+
+            {loadingBills && (
+              <div className="flex items-center justify-center py-8 gap-2 text-surface-400">
+                <Loader2 size={16} className="animate-spin" />
+                <span className="text-sm">Loading from QuickBooks…</span>
+              </div>
+            )}
+
+            {billsError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 flex items-center gap-2">
+                <AlertCircle size={14} className="text-red-500" />
+                <p className="text-sm text-red-700">{billsError}</p>
+              </div>
+            )}
+
+            {!loadingBills && bills.length === 0 && selectedRealmId && !billsError && (
+              <p className="text-sm text-surface-400 text-center py-6">No unpaid bills found.</p>
+            )}
+
+            <div className="space-y-2 max-h-[420px] overflow-y-auto">
+              {bills.map(b => (
+                <div key={b.id} className="rounded-xl border border-surface-200 p-4 hover:border-surface-300 transition-all">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <p className="text-sm font-semibold text-surface-900">{r.vendor}</p>
-                      <p className="text-xs text-surface-500">{r.id} · {r.category} · {r.date}</p>
+                      <p className="text-sm font-semibold text-surface-900">{b.vendor}</p>
+                      <p className="text-xs text-surface-500">
+                        #{b.doc_number} · Due: {b.due_date || b.txn_date}
+                      </p>
                     </div>
                     <div className="text-right space-y-1">
-                      <p className="text-sm font-bold text-surface-900">{r.amount}</p>
-                      <span className={`badge ${statusStyle[r.status]}`}>{r.status}</span>
+                      <p className="text-sm font-bold text-surface-900">{b.balance_formatted}</p>
+                      <span className={`badge ${statusStyle[b.status] ?? statusStyle.pending}`}>{b.status}</span>
                     </div>
                   </div>
-                  {r.status === 'pending' && (
+                  {b.status === 'pending' || b.status === 'overdue' ? (
                     <div className="flex gap-2 mt-3">
                       <button className="flex-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 transition-colors flex items-center justify-center gap-1">
                         <CheckCircle2 size={12} /> Approve
@@ -179,7 +228,7 @@ export function PaymentsPage() {
                         <Clock size={12} /> Hold
                       </button>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ))}
             </div>
