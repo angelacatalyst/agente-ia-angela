@@ -163,31 +163,48 @@ function ProjectsTab({ projects }: { projects: QBOProject[] }) {
     return (
       <div className="flex flex-col items-center justify-center h-48 text-surface-400 gap-2">
         <FolderOpen size={32} className="text-surface-300" />
-        <p className="text-sm">No QBO Projects found. Projects are tracked via Donors/Customers.</p>
-        <p className="text-xs text-surface-400">Switch to the <strong>Donors / Funders</strong> tab to see grant activity.</p>
+        <p className="text-sm">No grant projects found.</p>
+        <p className="text-xs text-surface-400">
+          Projects are created in QBO as sub-customers under a funder/donor.
+        </p>
       </div>
     )
   }
 
+  // Group by customer_name (funder)
+  const grouped: Record<string, QBOProject[]> = {}
+  for (const p of projects) {
+    const key = p.customer_name || 'No Funder'
+    if (!grouped[key]) grouped[key] = []
+    grouped[key].push(p)
+  }
+
   return (
-    <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-      {projects.map(p => (
-        <div key={p.id} className="card rounded-xl p-4 space-y-2">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="text-sm font-semibold text-surface-900 leading-tight">{p.name}</h3>
-            <span className={cn(
-              'shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full',
-              p.status === 'IN_PROGRESS' ? 'bg-emerald-50 text-emerald-700' : 'bg-surface-100 text-surface-500',
-            )}>
-              {p.status === 'IN_PROGRESS' ? 'Active' : p.status}
-            </span>
+    <div className="space-y-6">
+      {Object.entries(grouped).map(([funder, items]) => (
+        <div key={funder}>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-surface-400 mb-2">{funder}</p>
+          <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+            {items.map(p => (
+              <div key={p.id} className="card rounded-xl p-4 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-surface-900 leading-tight">{p.name}</h3>
+                  <span className={cn(
+                    'shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full',
+                    p.status === 'IN_PROGRESS' ? 'bg-emerald-50 text-emerald-700' : 'bg-surface-100 text-surface-500',
+                  )}>
+                    {p.status === 'IN_PROGRESS' ? 'Active' : 'Closed'}
+                  </span>
+                </div>
+                {(p as any).balance_formatted && (p as any).balance > 0 && (
+                  <div className="flex items-center gap-1">
+                    <DollarSign size={10} className="text-emerald-500" />
+                    <span className="text-[11px] text-emerald-700 font-medium">{(p as any).balance_formatted}</span>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
-          {p.customer_name && (
-            <p className="text-xs text-surface-500">Funder: {p.customer_name}</p>
-          )}
-          {p.description && (
-            <p className="text-xs text-surface-400 line-clamp-2">{p.description}</p>
-          )}
         </div>
       ))}
     </div>

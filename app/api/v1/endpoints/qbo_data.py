@@ -329,8 +329,14 @@ async def get_projects(
     except Exception as e:
         logger.warning("Customers fetch failed", error=str(e))
 
-    # Build project rows from QBO Projects
+    # Separate top-level customers (donors) from sub-customers (projects)
+    top_customers = {c["Id"]: c for c in customers if not c.get("ParentRef")}
+    sub_customers = [c for c in customers if c.get("ParentRef")]
+
+    # Build project rows: QBO Projects + sub-customers (grant projects under donors)
     project_rows = []
+
+    # Add QBO native Projects first (if any)
     for p in projects:
         project_rows.append({
             "id": p.get("Id", ""),
@@ -342,13 +348,30 @@ async def get_projects(
             "source": "project",
         })
 
-    # Build donor rows from Customers (grant donors)
-    donor_rows = []
-    for c in customers:
-        # Skip sub-customers for cleaner list
-        if c.get("ParentRef"):
-            continue
+    # Add sub-customers as grant projects
+    for c in sub_customers:
+        parent_id = (c.get("ParentRef") or {}).get("value", "")
+        parent = top_customers.get(parent_id, {})
+        parent_name = parent.get("DisplayName") or parent.get("CompanyName") or "Unknown Funder"
         balance = float(c.get("Balance", 0) or 0)
+        project_rows.append({
+            "id": c.get("Id", ""),
+            "name": c.get("DisplayName") or c.get("PrintOnCheckName") or "Unknown",
+            "status": "IN_PROGRESS" if c.get("Active", True) else "CLOSED",
+            "customer_id": parent_id,
+            "customer_name": parent_name,
+            "description": f"Grant under {parent_name}",
+            "balance": balance,
+            "balance_formatted": f"${balance:,.2f}",
+            "source": "sub_customer",
+        })
+
+    # Build donor rows from top-level customers only
+    donor_rows = []
+    for c in top_customers.values():
+        balance = float(c.get("Balance", 0) or 0)
+        # Count sub-projects under this donor
+        sub_count = sum(1 for s in sub_customers if (s.get("ParentRef") or {}).get("value") == c["Id"])
         donor_rows.append({
             "id": c.get("Id", ""),
             "name": c.get("DisplayName") or c.get("CompanyName") or c.get("PrintOnCheckName") or "Unknown",
@@ -356,8 +379,12 @@ async def get_projects(
             "balance_formatted": f"${balance:,.2f}",
             "email": (c.get("PrimaryEmailAddr") or {}).get("Address", ""),
             "active": c.get("Active", True),
+            "sub_projects": sub_count,
             "source": "customer",
         })
+
+    # Sort donors by balance desc
+    donor_rows.sort(key=lambda x: x["balance"], reverse=True)
 
     return {
         "projects": project_rows,
