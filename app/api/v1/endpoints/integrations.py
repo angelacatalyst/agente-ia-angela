@@ -36,7 +36,7 @@ async def qbo_authorize(
 @router.get("/qbo/callback", summary="QBO OAuth2 callback handler")
 async def qbo_callback(
     code: str = Query(...),
-    realm_id: str = Query(...),
+    realmId: str = Query(...),
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -45,12 +45,12 @@ async def qbo_callback(
     and stores them in the database.
     """
     try:
-        token_data = await exchange_code_for_tokens(code, realm_id)
+        token_data = await exchange_code_for_tokens(code, realmId)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}") from exc
 
     # Upsert token record
-    existing = await db.get(QBOToken, realm_id)
+    existing = await db.get(QBOToken, realmId)
     if existing:
         existing.access_token = token_data["access_token"]
         existing.refresh_token = token_data["refresh_token"]
@@ -58,15 +58,15 @@ async def qbo_callback(
         existing.updated_at = datetime.now(timezone.utc)
     else:
         db.add(QBOToken(
-            realm_id=realm_id,
-            user_id="default",  # In production: extract from state
+            realm_id=realmId,
+            user_id="angela",
             access_token=token_data["access_token"],
             refresh_token=token_data["refresh_token"],
             expires_at=token_data["expires_at"],
         ))
 
     await db.commit()
-    return {"status": "connected", "realm_id": realm_id}
+    return {"status": "Empresa conectada exitosamente", "realm_id": realmId}
 
 
 @router.get("/qbo/status", summary="Check QBO connection status")
