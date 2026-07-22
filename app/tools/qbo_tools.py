@@ -178,6 +178,96 @@ def build_qbo_tools(client: Any) -> list:  # list[BaseTool]
         result = await client.create_bill(payload)
         return json.dumps(result, default=str)
 
+    @tool
+    async def get_bank_accounts() -> str:
+        """List all active Bank and Credit Card accounts from QuickBooks Online."""
+        data = await client.get_bank_accounts()
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_reconciliation_detail(
+        account_id: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> str:
+        """Fetch the reconciliation detail report for a specific bank/credit card account.
+        Args:
+            account_id: QBO Account ID (use get_bank_accounts to find it).
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_reconciliation_report(
+            account_id, start_date or None, end_date or None
+        )
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_bank_transactions(
+        account_id: str,
+        start_date: str,
+        end_date: str,
+    ) -> str:
+        """Fetch all transactions for a specific bank account in a date range.
+        Args:
+            account_id: QBO Account ID.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_bank_transactions(account_id, start_date, end_date)
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_cash_flow(start_date: str = "", end_date: str = "") -> str:
+        """Fetch the Cash Flow Statement from QuickBooks Online.
+        Args:
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_cash_flow_statement(start_date or None, end_date or None)
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_payroll_entries(start_date: str = "", end_date: str = "") -> str:
+        """Fetch payroll journal entries from QuickBooks Online.
+        Args:
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_payroll_journal_entries(start_date or None, end_date or None)
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_employees() -> str:
+        """Fetch the active employee list from QuickBooks Online."""
+        data = await client.get_employee_list()
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_time_activities(start_date: str = "", end_date: str = "") -> str:
+        """Fetch time tracking / timesheet entries from QuickBooks Online.
+        Args:
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_time_activities(start_date or None, end_date or None)
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_uncategorized_expenses() -> str:
+        """Fetch all expenses assigned to 'Uncategorized Expense' in QuickBooks Online."""
+        data = await client.get_uncategorized_expenses()
+        return json.dumps(data, default=str)
+
+    @tool
+    async def get_all_expenses(start_date: str = "", end_date: str = "") -> str:
+        """Fetch all expense transactions (purchases) from QuickBooks Online.
+        Args:
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        data = await client.get_all_expenses(start_date or None, end_date or None)
+        return json.dumps(data, default=str)
+
     return [
         get_balance_sheet,
         get_profit_loss,
@@ -194,4 +284,16 @@ def build_qbo_tools(client: Any) -> list:  # list[BaseTool]
         get_classes,
         create_vendor,
         create_bill,
+        # Bank Reconciliation tools
+        get_bank_accounts,
+        get_reconciliation_detail,
+        get_bank_transactions,
+        get_cash_flow,
+        # Payroll tools
+        get_payroll_entries,
+        get_employees,
+        get_time_activities,
+        # Categorization tools
+        get_uncategorized_expenses,
+        get_all_expenses,
     ]

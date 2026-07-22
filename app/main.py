@@ -12,7 +12,8 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.agents.orchestrator import FinanceOrchestrator
 from app.api.v1.endpoints.chat import set_orchestrator
@@ -48,7 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize orchestrator
     orchestrator = FinanceOrchestrator()
     set_orchestrator(orchestrator)
-    logger.info("LangGraph orchestrator initialized with 8 specialist agents")
+    logger.info("LangGraph orchestrator initialized with 10 specialist agents")
 
     yield
 
@@ -177,6 +178,26 @@ async def qbo_callback_shortcut(
             ))
         await db.commit()
     return {"status": "Empresa conectada exitosamente", "realm_id": realm_id}
+
+
+# ── Serve React frontend (production) ────────────────────────────────────────
+
+import os as _os
+_FRONTEND_DIST = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "dist")
+
+if _os.path.isdir(_FRONTEND_DIST):
+    # Serve static assets (JS, CSS, images)
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_os.path.join(_FRONTEND_DIST, "assets")),
+        name="assets",
+    )
+
+    # Catch-all: serve index.html for any non-API route (React Router)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_react(full_path: str) -> FileResponse:
+        index = _os.path.join(_FRONTEND_DIST, "index.html")
+        return FileResponse(index)
 
 
 if __name__ == "__main__":

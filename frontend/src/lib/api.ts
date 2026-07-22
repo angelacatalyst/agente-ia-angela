@@ -25,6 +25,8 @@ export type AgentModule =
   | 'sop_builder'
   | 'eod_report'
   | 'controller'
+  | 'bank_reconciliation'
+  | 'payroll_allocation'
 
 export interface ChatRequest {
   message: string

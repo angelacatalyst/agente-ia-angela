@@ -20,10 +20,12 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
+from app.agents.bank_reconciliation import BankReconciliationAgent
 from app.agents.controller import ControllerAgent
 from app.agents.eod_report import EODReportAgent
 from app.agents.grant_compliance import GrantComplianceAgent
 from app.agents.payment_request import PaymentRequestAgent
+from app.agents.payroll_allocation import PayrollAllocationAgent
 from app.agents.qbo_auditor import QBOAuditorAgent
 from app.agents.sop_builder import SOPBuilderAgent
 from app.agents.transaction_coder import TransactionCoderAgent
@@ -45,6 +47,8 @@ AgentNode = Literal[
     "sop_builder",
     "eod_report",
     "controller",
+    "bank_reconciliation",
+    "payroll_allocation",
     "__end__",
 ]
 
@@ -64,14 +68,16 @@ You are a routing classifier for a Finance Operations AI system.
 Given a user message, identify which specialist module should handle it.
 
 Modules:
-- qbo_auditor: Auditing QBO files, reviewing reports, finding accounting errors, reconciliation issues
-- transaction_coder: Categorizing transactions, coding bank feeds, CSV/Excel imports, Ramp exports
+- qbo_auditor: Auditing QBO files, reviewing reports, finding accounting errors, audit findings
+- transaction_coder: Categorizing transactions, coding bank feeds, CSV/Excel imports, uncategorized expenses
 - grant_compliance: Grant audits, grant compliance, nonprofit fund accounting, restricted funds
 - payment_request: Processing bills, verifying invoices, payment approvals, AP documentation
 - vendor_onboarding: New vendor setup, W-9, ACH, vendor documentation, vendor checklist
 - sop_builder: Creating SOPs, documenting processes, accounting procedures, workflow documentation
 - eod_report: End of day reports, daily summaries, work logs, what did I do today
 - controller: Controller review, financial dashboards, month-end close, morning briefing, financial analysis
+- bank_reconciliation: Bank reconciliation, credit card reconciliation, conciliacion de bancos, uncleared items, outstanding checks, deposits in transit, reconciling differences
+- payroll_allocation: Payroll analysis, payroll desglose, payroll breakdown, salary allocation, payroll journal entries, employee payroll, FTE allocation, payroll taxes, deductions, payroll compliance
 
 Respond with ONLY the module name. No explanation.
 """
@@ -91,16 +97,18 @@ class FinanceOrchestrator:
             api_key=settings.anthropic_api_key,
         )
 
-        # Instantiate all 8 specialist agents
+        # Instantiate all 10 specialist agents
         self._agents: dict[str, Any] = {
             "qbo_auditor": QBOAuditorAgent(qbo_tools=self._qbo_tools),
-            "transaction_coder": TransactionCoderAgent(),
+            "transaction_coder": TransactionCoderAgent(extra_tools=self._qbo_tools),
             "grant_compliance": GrantComplianceAgent(qbo_tools=self._qbo_tools),
             "payment_request": PaymentRequestAgent(qbo_tools=self._qbo_tools),
             "vendor_onboarding": VendorOnboardingAgent(qbo_tools=self._qbo_tools),
             "sop_builder": SOPBuilderAgent(),
             "eod_report": EODReportAgent(),
             "controller": ControllerAgent(qbo_tools=self._qbo_tools),
+            "bank_reconciliation": BankReconciliationAgent(qbo_tools=self._qbo_tools),
+            "payroll_allocation": PayrollAllocationAgent(qbo_tools=self._qbo_tools),
         }
 
         self._graph = self._build_graph()
@@ -256,8 +264,11 @@ class FinanceOrchestrator:
     def update_qbo_tools(self, qbo_tools: list[BaseTool]) -> None:
         """Hot-swap QBO tools (e.g., after OAuth token refresh)."""
         self._qbo_tools = qbo_tools
-        for agent in ["qbo_auditor", "grant_compliance", "payment_request",
-                      "vendor_onboarding", "controller"]:
+        for agent in [
+            "qbo_auditor", "grant_compliance", "payment_request",
+            "vendor_onboarding", "controller", "bank_reconciliation",
+            "payroll_allocation", "transaction_coder",
+        ]:
             if agent in self._agents:
                 self._agents[agent]._tools = (
                     self._agents[agent]._default_tools() + qbo_tools

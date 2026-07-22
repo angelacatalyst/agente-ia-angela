@@ -21,6 +21,8 @@ class AgentModule(str, Enum):
     sop_builder = "sop_builder"
     eod_report = "eod_report"
     controller = "controller"
+    bank_reconciliation = "bank_reconciliation"
+    payroll_allocation = "payroll_allocation"
     orchestrator = "orchestrator"
 
 

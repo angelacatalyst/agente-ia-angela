@@ -16,7 +16,13 @@ class TransactionCoderAgent(FinanceAgentBase):
     """
     Categorizes bank and credit card transactions with QBO account codes,
     grant, program, class, and project assignments.
+    Also pulls uncategorized expenses directly from QBO for review.
     """
+
+    module = "transaction_coder"
+
+    def __init__(self, extra_tools: list[BaseTool] | None = None) -> None:
+        super().__init__(extra_tools=extra_tools)
 
     module = "transaction_coder"
 

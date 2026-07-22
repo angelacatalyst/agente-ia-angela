@@ -224,3 +224,89 @@ class QBOClient:
 
     async def get_departments(self) -> list[dict]:
         return await self._query("SELECT * FROM Department WHERE Active = true MAXRESULTS 200")
+
+    # ── Bank Accounts ─────────────────────────────────────────────────────────
+
+    async def get_bank_accounts(self) -> list[dict]:
+        """Return all active bank and credit card accounts."""
+        return await self._query(
+            "SELECT * FROM Account WHERE Active = true AND "
+            "(AccountType = 'Bank' OR AccountType = 'Credit Card') MAXRESULTS 200"
+        )
+
+    async def get_reconciliation_report(
+        self, account_id: str, start_date: str | None = None, end_date: str | None = None
+    ) -> dict:
+        """Fetch the reconciliation detail report for a specific account."""
+        params: dict = {"account": account_id}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get("reports/ReconciliationDetail", params)
+
+    async def get_cash_flow_statement(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> dict:
+        """Fetch Cash Flow Statement from QBO."""
+        params: dict = {}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get("reports/CashFlow", params)
+
+    # ── Payroll ───────────────────────────────────────────────────────────────
+
+    async def get_payroll_journal_entries(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> list[dict]:
+        """Fetch journal entries that contain payroll-related accounts."""
+        clauses: list[str] = []
+        if start_date:
+            clauses.append(f"TxnDate >= '{start_date}'")
+        if end_date:
+            clauses.append(f"TxnDate <= '{end_date}'")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        # Payroll journal entries are typically JournalEntry type
+        return await self._query(f"SELECT * FROM JournalEntry {where} MAXRESULTS 500")
+
+    async def get_employee_list(self) -> list[dict]:
+        """Fetch active employees from QBO."""
+        return await self._query("SELECT * FROM Employee WHERE Active = true MAXRESULTS 200")
+
+    async def get_payroll_items(self) -> list[dict]:
+        """Fetch payroll items / pay types from QBO."""
+        return await self._query("SELECT * FROM PayrollItem MAXRESULTS 200")
+
+    async def get_time_activities(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> list[dict]:
+        """Fetch time activities (timesheets) from QBO."""
+        clauses: list[str] = []
+        if start_date:
+            clauses.append(f"TxnDate >= '{start_date}'")
+        if end_date:
+            clauses.append(f"TxnDate <= '{end_date}'")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return await self._query(f"SELECT * FROM TimeActivity {where} MAXRESULTS 500")
+
+    # ── Uncategorized Expenses ────────────────────────────────────────────────
+
+    async def get_uncategorized_expenses(self) -> list[dict]:
+        """Return expenses assigned to 'Uncategorized Expense' account."""
+        return await self._query(
+            "SELECT * FROM Purchase WHERE AccountRef.name = 'Uncategorized Expense' MAXRESULTS 500"
+        )
+
+    async def get_all_expenses(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> list[dict]:
+        """Return all expense transactions (Purchase type)."""
+        clauses: list[str] = []
+        if start_date:
+            clauses.append(f"TxnDate >= '{start_date}'")
+        if end_date:
+            clauses.append(f"TxnDate <= '{end_date}'")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return await self._query(f"SELECT * FROM Purchase {where} MAXRESULTS 1000")

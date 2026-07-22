@@ -13,6 +13,7 @@ import {
 const MODULES: AgentModule[] = [
   'orchestrator', 'qbo_auditor', 'transaction_coder', 'grant_compliance',
   'payment_request', 'vendor_onboarding', 'sop_builder', 'eod_report', 'controller',
+  'bank_reconciliation', 'payroll_allocation',
 ]
 
 type QuickPromptKey =
@@ -36,17 +37,20 @@ type ModuleKey =
   | 'module.orchestrator' | 'module.qbo_auditor' | 'module.transaction_coder'
   | 'module.grant_compliance' | 'module.payment_request' | 'module.vendor_onboarding'
   | 'module.sop_builder' | 'module.eod_report' | 'module.controller'
+  | 'module.bank_reconciliation' | 'module.payroll_allocation'
 
 const MODULE_KEY_MAP: Record<AgentModule, ModuleKey> = {
-  orchestrator:     'module.orchestrator',
-  qbo_auditor:      'module.qbo_auditor',
-  transaction_coder:'module.transaction_coder',
-  grant_compliance: 'module.grant_compliance',
-  payment_request:  'module.payment_request',
-  vendor_onboarding:'module.vendor_onboarding',
-  sop_builder:      'module.sop_builder',
-  eod_report:       'module.eod_report',
-  controller:       'module.controller',
+  orchestrator:       'module.orchestrator',
+  qbo_auditor:        'module.qbo_auditor',
+  transaction_coder:  'module.transaction_coder',
+  grant_compliance:   'module.grant_compliance',
+  payment_request:    'module.payment_request',
+  vendor_onboarding:  'module.vendor_onboarding',
+  sop_builder:        'module.sop_builder',
+  eod_report:         'module.eod_report',
+  controller:         'module.controller',
+  bank_reconciliation:'module.bank_reconciliation',
+  payroll_allocation: 'module.payroll_allocation',
 }
 
 export function ChatPage() {
