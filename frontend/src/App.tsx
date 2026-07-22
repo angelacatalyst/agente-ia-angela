@@ -13,6 +13,7 @@ import { SOPsPage } from '@/pages/SOPsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { BankRecPage } from '@/pages/BankRecPage'
 import { PayrollPage } from '@/pages/PayrollPage'
+import { ProjectsPage } from '@/pages/ProjectsPage'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5, retry: 1 } },
@@ -37,6 +38,7 @@ export default function App() {
               <Route path="/eod"          element={<EODPage />} />
               <Route path="/bank-rec"     element={<BankRecPage />} />
               <Route path="/payroll"      element={<PayrollPage />} />
+              <Route path="/projects"     element={<ProjectsPage />} />
               <Route path="/settings"     element={<SettingsPage />} />
             </Routes>
           </main>

@@ -217,6 +217,48 @@ class QBOClient:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return await self._query(f"SELECT * FROM JournalEntry {where} MAXRESULTS 200")
 
+    # ── Customers / Donors / Projects ────────────────────────────────────────
+
+    async def get_customers(self, active: bool = True) -> list[dict]:
+        where = "WHERE Active = true" if active else ""
+        return await self._query(f"SELECT * FROM Customer {where} MAXRESULTS 500")
+
+    async def get_projects(self) -> list[dict]:
+        """QBO Projects (grant tracking for nonprofits)."""
+        try:
+            return await self._query("SELECT * FROM Project MAXRESULTS 200")
+        except Exception:
+            return []
+
+    async def get_profit_loss_by_customer(
+        self,
+        customer_id: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict:
+        """P&L report filtered to a specific customer/donor (grant spending)."""
+        params: dict = {"customer": customer_id}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get("reports/ProfitAndLoss", params)
+
+    async def get_transactions_by_customer(
+        self,
+        customer_id: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        """All invoices and payments for a specific customer/donor."""
+        clauses = [f"CustomerRef = '{customer_id}'"]
+        if start_date:
+            clauses.append(f"TxnDate >= '{start_date}'")
+        if end_date:
+            clauses.append(f"TxnDate <= '{end_date}'")
+        where = f"WHERE {' AND '.join(clauses)}"
+        return await self._query(f"SELECT * FROM Invoice {where} MAXRESULTS 200")
+
     # ── Classes / Departments ─────────────────────────────────────────────────
 
     async def get_classes(self) -> list[dict]:

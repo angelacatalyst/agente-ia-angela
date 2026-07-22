@@ -306,6 +306,85 @@ async def get_transactions(
     return {"transactions": rows[:100], "total": len(rows), "fetched_at": datetime.now(timezone.utc).isoformat()}
 
 
+# ── Projects / Donors (Allapattah CDC grants) ────────────────────────────────
+
+@router.get("/projects")
+async def get_projects(
+    realm_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Returns QBO Projects and Customers/Donors for grant tracking."""
+    client = await _get_client(realm_id, db)
+
+    projects: list[dict] = []
+    customers: list[dict] = []
+
+    try:
+        projects = await client.get_projects()
+    except Exception as e:
+        logger.warning("Projects fetch failed", error=str(e))
+
+    try:
+        customers = await client.get_customers(active=True)
+    except Exception as e:
+        logger.warning("Customers fetch failed", error=str(e))
+
+    # Build project rows from QBO Projects
+    project_rows = []
+    for p in projects:
+        project_rows.append({
+            "id": p.get("Id", ""),
+            "name": p.get("Name", ""),
+            "status": p.get("ProjectStatus", "IN_PROGRESS"),
+            "customer_id": (p.get("CustomerRef") or {}).get("value", ""),
+            "customer_name": (p.get("CustomerRef") or {}).get("name", ""),
+            "description": p.get("Description", ""),
+            "source": "project",
+        })
+
+    # Build donor rows from Customers (grant donors)
+    donor_rows = []
+    for c in customers:
+        # Skip sub-customers for cleaner list
+        if c.get("ParentRef"):
+            continue
+        balance = float(c.get("Balance", 0) or 0)
+        donor_rows.append({
+            "id": c.get("Id", ""),
+            "name": c.get("DisplayName") or c.get("CompanyName") or c.get("PrintOnCheckName") or "Unknown",
+            "balance": balance,
+            "balance_formatted": f"${balance:,.2f}",
+            "email": (c.get("PrimaryEmailAddr") or {}).get("Address", ""),
+            "active": c.get("Active", True),
+            "source": "customer",
+        })
+
+    return {
+        "projects": project_rows,
+        "donors": donor_rows,
+        "total_projects": len(project_rows),
+        "total_donors": len(donor_rows),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/projects/pl")
+async def get_project_pl(
+    realm_id: str = Query(...),
+    customer_id: str = Query(...),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Returns P&L for a specific donor/grant (by customer_id)."""
+    client = await _get_client(realm_id, db)
+    try:
+        pl = await client.get_profit_loss_by_customer(customer_id, start_date, end_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"QBO error: {e}") from e
+    return {"report": pl, "customer_id": customer_id, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_bs_value(report: dict, labels: list[str]) -> float | None:

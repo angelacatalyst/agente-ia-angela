@@ -187,6 +187,10 @@ export const api = {
       apiClient.get<{ bills: QBOBill[]; total: number }>('/qbo/data/bills', { params: { realm_id: realmId, unpaid_only: unpaidOnly } }).then(r => r.data),
     transactions: (realmId: string) =>
       apiClient.get<{ transactions: QBOTransaction[]; total: number }>('/qbo/data/transactions', { params: { realm_id: realmId } }).then(r => r.data),
+    projects: (realmId: string) =>
+      apiClient.get<QBOProjectsResponse>('/qbo/data/projects', { params: { realm_id: realmId } }).then(r => r.data),
+    projectPL: (realmId: string, customerId: string, startDate?: string, endDate?: string) =>
+      apiClient.get('/qbo/data/projects/pl', { params: { realm_id: realmId, customer_id: customerId, start_date: startDate, end_date: endDate } }).then(r => r.data),
   },
 
   integrations: {
@@ -263,4 +267,32 @@ export interface QBOTransaction {
   type: string
   status: string
   doc_number: string
+}
+
+export interface QBOProject {
+  id: string
+  name: string
+  status: string
+  customer_id: string
+  customer_name: string
+  description: string
+  source: 'project' | 'customer'
+}
+
+export interface QBODonor {
+  id: string
+  name: string
+  balance: number
+  balance_formatted: string
+  email: string
+  active: boolean
+  source: 'customer'
+}
+
+export interface QBOProjectsResponse {
+  projects: QBOProject[]
+  donors: QBODonor[]
+  total_projects: number
+  total_donors: number
+  fetched_at: string
 }
