@@ -25,7 +25,6 @@ router = APIRouter(prefix="/integrations", tags=["Integrations"])
 @router.get("/qbo/authorize", summary="Start QBO OAuth2 flow")
 async def qbo_authorize(
     user_id: str = Query(...),
-    _: str = Depends(verify_api_key),
 ) -> dict:
     """
     Generate the QBO authorization URL.
