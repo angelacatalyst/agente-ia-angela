@@ -6,6 +6,7 @@ import secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,14 +26,11 @@ router = APIRouter(prefix="/integrations", tags=["Integrations"])
 @router.get("/qbo/authorize", summary="Start QBO OAuth2 flow")
 async def qbo_authorize(
     user_id: str = Query(...),
-) -> dict:
-    """
-    Generate the QBO authorization URL.
-    Redirect the user to this URL to connect their QuickBooks company.
-    """
+) -> RedirectResponse:
+    """Redirect user to Intuit OAuth2 authorization page."""
     state = secrets.token_urlsafe(32)
     auth_url = get_authorization_url(state)
-    return {"authorization_url": auth_url, "state": state}
+    return RedirectResponse(url=auth_url)
 
 
 @router.get("/qbo/callback", summary="QBO OAuth2 callback handler")
