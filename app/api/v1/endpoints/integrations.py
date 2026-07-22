@@ -103,7 +103,6 @@ _COMPANY_NAMES: dict[str, str] = {
 @router.get("/qbo/companies", summary="List all connected QBO companies")
 async def qbo_companies(
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(verify_api_key),
 ) -> list[dict]:
     """Return all QBO realms stored in the database with their connection status."""
     result = await db.execute(select(QBOToken))

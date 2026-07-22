@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db, get_qbo_client_for_realm
 from app.core.logging import get_logger
-from app.core.security import verify_api_key
 
 router = APIRouter(prefix="/qbo/data", tags=["QBO Data"])
 logger = get_logger(__name__)
@@ -37,7 +36,6 @@ async def _get_client(realm_id: str, db: AsyncSession) -> Any:
 @router.get("/dashboard")
 async def get_dashboard(
     realm_id: str = Query(..., description="QBO realm/company ID"),
-    _: str = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
@@ -184,7 +182,6 @@ async def get_dashboard(
 @router.get("/vendors")
 async def get_vendors(
     realm_id: str = Query(...),
-    _: str = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Returns active vendors from QBO."""
@@ -218,7 +215,6 @@ async def get_vendors(
 async def get_bills(
     realm_id: str = Query(...),
     unpaid_only: bool = Query(True),
-    _: str = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Returns bills from QBO, defaulting to unpaid only."""
@@ -264,7 +260,6 @@ async def get_bills(
 @router.get("/transactions")
 async def get_transactions(
     realm_id: str = Query(...),
-    _: str = Depends(verify_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Returns open invoices and unpaid bills as a combined transaction view."""
