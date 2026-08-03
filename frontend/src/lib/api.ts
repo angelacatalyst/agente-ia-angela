@@ -206,6 +206,46 @@ export const api = {
         params,
       }).then(r => r.data)
     },
+    previewQBO: (
+      file: File,
+      realmId: string,
+      periodIndex: number,
+      opts?: { expenseAccount?: string; payrollVendor?: string; includePending?: boolean },
+    ) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      return apiClient.post<PayrollQBOPreviewResponse>('/payroll/post-to-qbo', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params: {
+          realm_id: realmId,
+          period_index: periodIndex,
+          dry_run: true,
+          expense_account: opts?.expenseAccount ?? 'Salaries & Wages',
+          payroll_vendor: opts?.payrollVendor ?? 'Gusto',
+          include_pending: opts?.includePending ?? false,
+        },
+      }).then(r => r.data)
+    },
+    postToQBO: (
+      file: File,
+      realmId: string,
+      periodIndex: number,
+      opts?: { expenseAccount?: string; payrollVendor?: string; includePending?: boolean },
+    ) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      return apiClient.post<PayrollQBOPostResult>('/payroll/post-to-qbo', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params: {
+          realm_id: realmId,
+          period_index: periodIndex,
+          dry_run: false,
+          expense_account: opts?.expenseAccount ?? 'Salaries & Wages',
+          payroll_vendor: opts?.payrollVendor ?? 'Gusto',
+          include_pending: opts?.includePending ?? false,
+        },
+      }).then(r => r.data)
+    },
   },
 
   integrations: {
@@ -397,4 +437,62 @@ export interface PayrollMatrixEmployee {
 export interface PayrollMatrixResponse {
   matrix: Record<string, PayrollMatrixEmployee>
   employee_count: number
+}
+
+// ── QBO Payroll posting types ─────────────────────────────────────────────────
+
+export interface PayrollQBOLookup {
+  searched: string
+  found: boolean
+  qbo_name: string | null
+  qbo_id: string | null
+}
+
+export interface PayrollQBOBillLine {
+  Id: string
+  DetailType: string
+  Amount: number
+  Description: string
+  AccountBasedExpenseLineDetail: {
+    AccountRef: { value: string }
+    ClassRef?: { value: string }
+    CustomerRef?: { value: string }
+    BillableStatus: string
+  }
+}
+
+export interface PayrollQBOPreviewResponse {
+  dry_run: true
+  period: string
+  payday: string
+  period_total_cost: number
+  qbo_lookups: {
+    vendor: PayrollQBOLookup
+    expense_account: PayrollQBOLookup
+    classes: Record<string, PayrollQBOLookup>
+    customers: Record<string, PayrollQBOLookup>
+  }
+  bill_preview: {
+    VendorRef: { value: string }
+    TxnDate: string
+    DocNumber: string
+    PrivateNote: string
+    Line: PayrollQBOBillLine[]
+  }
+  line_count: number
+  bill_total: number
+  warnings: string[]
+  ready_to_post: boolean
+}
+
+export interface PayrollQBOPostResult {
+  dry_run: false
+  period: string
+  payday: string
+  bill_id: string
+  doc_number: string
+  bill_total: number
+  line_count: number
+  qbo_link: string
+  warnings: string[]
 }

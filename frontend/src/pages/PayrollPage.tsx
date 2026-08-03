@@ -4,12 +4,15 @@ import { api } from '@/lib/api'
 import type {
   PayrollPeriod, PayrollMatrixResponse,
   PayrollJournalEntry, PayrollBudgetInfo,
+  PayrollQBOPreviewResponse, PayrollQBOPostResult,
+  QBOCompany,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   Users, Loader2, Upload, AlertCircle, ChevronDown,
   DollarSign, FileText, BarChart2, CheckCircle2, Info,
   Building2, BookOpen, AlertTriangle, TrendingUp,
+  Send, X, ExternalLink, ShieldCheck, Eye,
 } from 'lucide-react'
 
 type Tab = 'calculator' | 'budget' | 'matrix' | 'journal'
@@ -56,6 +59,67 @@ export function PayrollPage() {
   // ── Matrix state ──────────────────────────────────────────────────────────
   const [matrix, setMatrix] = useState<PayrollMatrixResponse | null>(null)
   const [matrixLoading, setMatrixLoading] = useState(false)
+
+  // ── QBO post state ────────────────────────────────────────────────────────
+  const [qboModalOpen, setQboModalOpen] = useState(false)
+  const [qboCompanies, setQboCompanies] = useState<QBOCompany[]>([])
+  const [qboRealm, setQboRealm] = useState('')
+  const [qboVendor, setQboVendor] = useState('Gusto')
+  const [qboAccount, setQboAccount] = useState('Salaries & Wages')
+  const [qboPreview, setQboPreview] = useState<PayrollQBOPreviewResponse | null>(null)
+  const [qboPreviewLoading, setQboPreviewLoading] = useState(false)
+  const [qboPosting, setQboPosting] = useState(false)
+  const [qboPostResult, setQboPostResult] = useState<PayrollQBOPostResult | null>(null)
+  const [qboError, setQboError] = useState<string | null>(null)
+
+  const openQboModal = async () => {
+    setQboModalOpen(true)
+    setQboPreview(null)
+    setQboPostResult(null)
+    setQboError(null)
+    if (qboCompanies.length === 0) {
+      try {
+        const companies = await api.integrations.qboCompanies()
+        setQboCompanies(companies)
+        if (companies.length > 0 && !qboRealm) setQboRealm(companies[0].realm_id)
+      } catch { /* silent */ }
+    }
+  }
+
+  const runQboPreview = async () => {
+    if (!fileRef.current?.files?.[0] || !qboRealm) return
+    setQboPreviewLoading(true)
+    setQboPreview(null)
+    setQboError(null)
+    try {
+      const preview = await api.payroll.previewQBO(
+        fileRef.current.files[0], qboRealm, selectedPeriodIdx,
+        { expenseAccount: qboAccount, payrollVendor: qboVendor },
+      )
+      setQboPreview(preview)
+    } catch (err: any) {
+      setQboError(err?.response?.data?.detail ?? 'Error connecting to QBO')
+    } finally {
+      setQboPreviewLoading(false)
+    }
+  }
+
+  const confirmQboPost = async () => {
+    if (!fileRef.current?.files?.[0] || !qboRealm) return
+    setQboPosting(true)
+    setQboError(null)
+    try {
+      const result = await api.payroll.postToQBO(
+        fileRef.current.files[0], qboRealm, selectedPeriodIdx,
+        { expenseAccount: qboAccount, payrollVendor: qboVendor },
+      )
+      setQboPostResult(result)
+    } catch (err: any) {
+      setQboError(err?.response?.data?.detail ?? 'Error posting to QBO')
+    } finally {
+      setQboPosting(false)
+    }
+  }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -206,6 +270,15 @@ export function PayrollPage() {
                           PENDING: {fmt(selectedPeriod.period_grant_totals['PENDING'])}
                         </div>
                       )}
+                      {/* Post to QBO button */}
+                      <div className="pt-2">
+                        <button
+                          onClick={openQboModal}
+                          className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-xs font-semibold transition-colors"
+                        >
+                          <Send size={12} /> Post to QBO
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -723,6 +796,292 @@ export function PayrollPage() {
           </div>
         )}
       </div>
+
+      {/* ══ QBO Post Modal ══════════════════════════════════════════════════ */}
+      {qboModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-end">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+            onClick={() => setQboModalOpen(false)}
+          />
+          {/* Panel */}
+          <div className="relative z-10 h-full w-[520px] overflow-y-auto bg-white shadow-2xl border-l border-surface-200 flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-surface-100 bg-surface-50 shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-100">
+                  <Send size={13} className="text-primary-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-surface-900">Post Allocations to QBO</p>
+                  {selectedPeriod && (
+                    <p className="text-[11px] text-surface-400">{selectedPeriod.period}</p>
+                  )}
+                </div>
+              </div>
+              <button onClick={() => setQboModalOpen(false)} className="p-1.5 rounded-lg hover:bg-surface-100 text-surface-400">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex-1 p-5 space-y-4">
+              {/* Success state */}
+              {qboPostResult && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={18} className="text-emerald-600" />
+                    <p className="text-sm font-bold text-emerald-800">Bill created in QBO!</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {[
+                      ['Period', qboPostResult.period],
+                      ['Doc #', qboPostResult.doc_number],
+                      ['Lines', String(qboPostResult.line_count)],
+                      ['Total', fmt(qboPostResult.bill_total ?? 0)],
+                    ].map(([label, val]) => (
+                      <div key={label} className="rounded-lg bg-emerald-100/60 px-3 py-2">
+                        <p className="text-emerald-600">{label}</p>
+                        <p className="font-semibold text-emerald-900">{val}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <a
+                    href={qboPostResult.qbo_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:underline"
+                  >
+                    <ExternalLink size={12} /> Open in QuickBooks
+                  </a>
+                  {qboPostResult.warnings.length > 0 && (
+                    <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-1">
+                      {qboPostResult.warnings.map((w, i) => (
+                        <p key={i} className="text-[11px] text-amber-700">⚠ {w}</p>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => { setQboPostResult(null); setQboPreview(null) }}
+                    className="w-full rounded-lg border border-surface-200 px-3 py-2 text-xs font-medium text-surface-600 hover:bg-surface-50"
+                  >
+                    Post another period
+                  </button>
+                </div>
+              )}
+
+              {!qboPostResult && (
+                <>
+                  {/* Step 1: QBO Company */}
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-surface-700 flex items-center gap-1">
+                      <Building2 size={12} className="text-surface-400" /> QBO Company
+                    </p>
+                    {qboCompanies.length === 0 ? (
+                      <div className="flex items-center gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                        <AlertCircle size={13} className="text-amber-500" />
+                        <p className="text-xs text-amber-700">No QBO companies connected. Connect QBO in Integrations first.</p>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <select
+                          value={qboRealm}
+                          onChange={e => { setQboRealm(e.target.value); setQboPreview(null) }}
+                          className="w-full appearance-none rounded-lg border border-surface-200 bg-white px-3 py-2.5 pr-8 text-xs font-medium text-surface-800 focus:border-primary-400 focus:outline-none"
+                        >
+                          {qboCompanies.map(c => (
+                            <option key={c.realm_id} value={c.realm_id}>{c.company_name}</option>
+                          ))}
+                        </select>
+                        <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-surface-400" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Step 2: Vendor + Account */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[11px] font-semibold text-surface-600">Vendor in QBO</label>
+                      <input
+                        value={qboVendor}
+                        onChange={e => { setQboVendor(e.target.value); setQboPreview(null) }}
+                        className="w-full rounded-lg border border-surface-200 px-3 py-2 text-xs focus:border-primary-400 focus:outline-none"
+                        placeholder="Gusto"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[11px] font-semibold text-surface-600">Expense Account</label>
+                      <input
+                        value={qboAccount}
+                        onChange={e => { setQboAccount(e.target.value); setQboPreview(null) }}
+                        className="w-full rounded-lg border border-surface-200 px-3 py-2 text-xs focus:border-primary-400 focus:outline-none"
+                        placeholder="Salaries & Wages"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Preview button */}
+                  {!qboPreview && (
+                    <button
+                      onClick={runQboPreview}
+                      disabled={qboPreviewLoading || !qboRealm}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-primary-300 bg-primary-50 hover:bg-primary-100 text-primary-700 px-3 py-2.5 text-xs font-semibold transition-colors disabled:opacity-50"
+                    >
+                      {qboPreviewLoading
+                        ? <><Loader2 size={12} className="animate-spin" /> Checking QBO…</>
+                        : <><Eye size={12} /> Preview QBO Lookups</>
+                      }
+                    </button>
+                  )}
+
+                  {/* Error */}
+                  {qboError && (
+                    <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+                      <AlertCircle size={13} className="text-red-500 shrink-0 mt-0.5" />
+                      <p className="text-xs text-red-700">{qboError}</p>
+                    </div>
+                  )}
+
+                  {/* Preview results */}
+                  {qboPreview && (
+                    <div className="space-y-3">
+                      {/* Lookup status grid */}
+                      <div className="rounded-xl border border-surface-200 overflow-hidden">
+                        <div className="px-3 py-2 bg-surface-50 border-b border-surface-100">
+                          <p className="text-[11px] font-semibold text-surface-600 uppercase tracking-wider">QBO Lookups</p>
+                        </div>
+
+                        {/* Vendor + Account */}
+                        <div className="divide-y divide-surface-50">
+                          {[
+                            { label: 'Vendor', info: qboPreview.qbo_lookups.vendor },
+                            { label: 'Account', info: qboPreview.qbo_lookups.expense_account },
+                          ].map(({ label, info }) => (
+                            <div key={label} className="flex items-center justify-between px-3 py-2">
+                              <span className="text-xs text-surface-500">{label}: <span className="font-medium text-surface-700">"{info.searched}"</span></span>
+                              {info.found
+                                ? <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 rounded-full px-2 py-0.5"><CheckCircle2 size={10} /> {info.qbo_name}</span>
+                                : <span className="text-[11px] font-semibold text-red-600 bg-red-50 rounded-full px-2 py-0.5">Not found</span>
+                              }
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Classes */}
+                        <div className="px-3 py-2 bg-surface-50/50 border-t border-surface-100">
+                          <p className="text-[10px] font-semibold text-surface-400 mb-1.5 uppercase tracking-wider">Classes</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(qboPreview.qbo_lookups.classes).map(([cls, info]) => (
+                              <span key={cls} className={cn(
+                                'inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
+                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200',
+                              )}>
+                                {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}
+                                {cls}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Grants / Customers */}
+                        <div className="px-3 py-2 border-t border-surface-100">
+                          <p className="text-[10px] font-semibold text-surface-400 mb-1.5 uppercase tracking-wider">Grants (QBO Customers)</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(qboPreview.qbo_lookups.customers).map(([g, info]) => (
+                              <span key={g} className={cn(
+                                'inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
+                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200',
+                              )}>
+                                {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}
+                                {g}{info.found && info.qbo_name !== g ? ` → ${info.qbo_name}` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Bill summary */}
+                      <div className="rounded-xl border border-surface-200 p-3 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-semibold text-surface-800">{qboPreview.line_count} bill lines</p>
+                          <p className="text-[11px] text-surface-400">Payday: {qboPreview.payday}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold text-surface-900">{fmt(qboPreview.bill_total)}</p>
+                          <p className="text-[11px] text-surface-400">bill total</p>
+                        </div>
+                      </div>
+
+                      {/* Bill line preview (collapsed, max 6) */}
+                      {qboPreview.bill_preview.Line.length > 0 && (
+                        <div className="rounded-xl border border-surface-200 overflow-hidden">
+                          <div className="px-3 py-2 bg-surface-50 border-b border-surface-100">
+                            <p className="text-[11px] font-semibold text-surface-600 uppercase tracking-wider">Bill Lines Preview</p>
+                          </div>
+                          <div className="divide-y divide-surface-50">
+                            {qboPreview.bill_preview.Line.slice(0, 8).map((line) => (
+                              <div key={line.Id} className="flex items-center justify-between px-3 py-1.5">
+                                <p className="text-[11px] text-surface-600 truncate max-w-[300px]">{line.Description}</p>
+                                <p className="text-[11px] font-semibold text-surface-900 shrink-0 ml-2">{fmt(line.Amount)}</p>
+                              </div>
+                            ))}
+                            {qboPreview.bill_preview.Line.length > 8 && (
+                              <div className="px-3 py-1.5 text-[11px] text-surface-400 bg-surface-50">
+                                + {qboPreview.bill_preview.Line.length - 8} more lines…
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Warnings */}
+                      {qboPreview.warnings.length > 0 && (
+                        <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-1">
+                          <p className="text-[11px] font-semibold text-amber-700 mb-1">Warnings</p>
+                          {qboPreview.warnings.map((w, i) => (
+                            <p key={i} className="text-[11px] text-amber-700">⚠ {w}</p>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Change preview / Confirm */}
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setQboPreview(null) }}
+                          className="flex-1 rounded-lg border border-surface-200 px-3 py-2 text-xs font-medium text-surface-600 hover:bg-surface-50"
+                        >
+                          Change settings
+                        </button>
+                        <button
+                          onClick={confirmQboPost}
+                          disabled={!qboPreview.ready_to_post || qboPosting}
+                          className={cn(
+                            'flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition-colors',
+                            qboPreview.ready_to_post
+                              ? 'bg-primary-600 hover:bg-primary-700 text-white'
+                              : 'bg-surface-200 text-surface-400 cursor-not-allowed',
+                          )}
+                        >
+                          {qboPosting
+                            ? <><Loader2 size={12} className="animate-spin" /> Posting…</>
+                            : <><ShieldCheck size={12} /> Confirm &amp; Post to QBO</>
+                          }
+                        </button>
+                      </div>
+
+                      {!qboPreview.ready_to_post && (
+                        <p className="text-[11px] text-red-600 text-center">
+                          Fix the missing vendor or expense account in QBO before posting.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
