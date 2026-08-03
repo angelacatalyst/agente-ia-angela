@@ -1,12 +1,15 @@
 """
 Payroll Allocation Endpoint
 Processes Gusto payroll exports and applies the stored allocation matrix
-to produce per-class, per-grant cost breakdowns and QBO journal entry templates.
+with WATERFALL grant coverage logic:
+  - Each grant covers a pool of classes until its annual budget is exhausted
+  - When a grant runs out, the next grant in priority order takes over
+  - If all grants for a pool are exhausted → PENDING
+  - Some grants are earmarked to specific classes (e.g. WELLS FARGO → 3010 only)
 """
 from __future__ import annotations
 
 import io
-import json
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
@@ -15,9 +18,14 @@ import openpyxl
 router = APIRouter(prefix="/payroll", tags=["payroll"])
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Allocation Matrix (stored here; editable via PUT /payroll/matrix in v2)
-# Derived from the Payroll Allocation Matrix.xlsx uploaded by Angela
-# Format: first_name_key → { classes: {name: pct}, grants: [name, ...] }
+# Allocation Matrix
+#
+# grant_rules: list of "pools" — each pool is a group of classes covered by
+#   the same waterfall of grants.
+#   pool_classes : which classes belong to this pool
+#   waterfall    : grants in priority order; each has name + annual_budget.
+#                  The first grant covers until exhausted, then the next, etc.
+#                  If all exhausted → amount goes to PENDING.
 # ─────────────────────────────────────────────────────────────────────────────
 ALLOCATION_MATRIX: dict[str, dict] = {
     "Santander": {
@@ -26,116 +34,188 @@ ALLOCATION_MATRIX: dict[str, dict] = {
         "gusto_last": "Arguelles",
         "gusto_first": "Santander",
         "classes": {
-            "Fundraising": 0.08,
-            "3010": 0.72,
-            "Community Asset": 0.20,
+            "Fundraising":      0.08,
+            "3010":             0.72,
+            "Community Asset":  0.20,
         },
-        "grants": [
-            {"name": "B3", "annual_budget": 12500.00, "classes": ["Fundraising"]},
-            {"name": "FIRST CITIZEN", "annual_budget": 20000.00, "classes": ["Community Asset"]},
-            {"name": "WELLS FARGO", "annual_budget": 83886.94, "classes": ["3010"]},
+        # Pool 1: WELLS FARGO earmarked for 3010 only
+        # Pool 2: B3 first → FIRST CITIZEN second → for Fundraising + Community Asset
+        "grant_rules": [
+            {
+                "pool_classes": ["3010"],
+                "waterfall": [
+                    {"name": "WELLS FARGO", "annual_budget": 83886.94},
+                ],
+            },
+            {
+                "pool_classes": ["Fundraising", "Community Asset"],
+                "waterfall": [
+                    {"name": "B3",           "annual_budget": 12500.00},
+                    {"name": "FIRST CITIZEN","annual_budget": 20000.00},
+                ],
+            },
         ],
         "dental_vision_employer": 24.37,
     },
+
     "Mileyka": {
         "full_name": "Mileyka Burgos-Flores",
         "title": "Chief Executive Officer",
         "gusto_last": "Burgos-Flores",
         "gusto_first": "Mileyka",
         "classes": {
-            "Fundraising": 0.40,
-            "Operations": 0.25,
-            "3010": 0.10,
-            "Community Asset": 0.05,
-            "ILB": 0.10,
-            "Smithsonian": 0.05,
+            "Fundraising":        0.40,
+            "Operations":         0.25,
+            "3010":               0.10,
+            "Community Asset":    0.05,
+            "ILB":                0.10,
+            "Smithsonian":        0.05,
             "Festival del Platano": 0.05,
         },
-        "grants": [
-            {"name": "MHFA", "annual_budget": 80000.00, "classes": ["Fundraising", "Operations", "Community Asset", "ILB", "Smithsonian", "Festival del Platano"]},
-            {"name": "WELLS FARGO", "annual_budget": 14731.92, "classes": ["3010"]},
+        # WELLS FARGO earmarked for 3010; MHFA covers everything else (waterfall)
+        "grant_rules": [
+            {
+                "pool_classes": ["3010"],
+                "waterfall": [
+                    {"name": "WELLS FARGO", "annual_budget": 14731.92},
+                ],
+            },
+            {
+                "pool_classes": [
+                    "Fundraising", "Operations", "Community Asset",
+                    "ILB", "Smithsonian", "Festival del Platano",
+                ],
+                "waterfall": [
+                    {"name": "MHFA (1)", "annual_budget": 25000.00},
+                    {"name": "MHFA (2)", "annual_budget": 30000.00},
+                    {"name": "MHFA (3)", "annual_budget": 25000.00},
+                ],
+            },
         ],
         "dental_vision_employer": 24.37,
     },
+
     "Meysa": {
         "full_name": "Meysa Arguelles",
         "title": "Director of Impact",
         "gusto_last": "Arguelles",
         "gusto_first": "Meysa",
         "classes": {
-            "Operations": 0.10,
-            "Fundraising": 0.10,
-            "SBRC": 0.30,
-            "La Oficina": 0.05,
-            "Negocios": 0.20,
-            "Bus C": 0.25,
+            "Operations":   0.10,
+            "Fundraising":  0.10,
+            "SBRC":         0.30,
+            "La Oficina":   0.05,
+            "Negocios":     0.20,
+            "Bus C":        0.25,
         },
-        "grants": [
-            {"name": "CITI", "annual_budget": 33377.05, "classes": ["Operations", "Fundraising", "SBRC", "La Oficina", "Negocios", "Bus C"]},
+        # Employee Jan–Jun: CITI covers all classes until its budget is exhausted.
+        # Contractor Jul 15–Dec: $4,100/mo (6 months = $24,600) covered by TRUIST.
+        # Both phases use the same class % allocation; TRUIST picks up after CITI.
+        "grant_rules": [
+            {
+                "pool_classes": [
+                    "Operations", "Fundraising", "SBRC",
+                    "La Oficina", "Negocios", "Bus C",
+                ],
+                "waterfall": [
+                    {"name": "CITI",   "annual_budget": 33377.05},
+                    {"name": "TRUIST", "annual_budget": 24600.00},  # contractor $4,100 × 6 mo
+                ],
+            },
         ],
-        "note": "CITI grant only through May. Becomes contractor from July 15 at $4,100/mo.",
+        "note": "Empleada Jan–Jun (CITI). Contratista Jul 15–Dic a $4,100/mes (TRUIST).",
         "dental_vision_employer": 24.37,
     },
+
     "Drelly": {
         "full_name": "Drelly Rios",
         "title": "Program Manager, Small Business Growth",
         "gusto_last": "Rios",
         "gusto_first": "Drelly",
         "classes": {
-            "SBRC": 0.10,
-            "La Oficina": 0.20,
-            "Negocios": 0.10,
-            "Capital Readiness": 0.20,
-            "Smithsonian": 0.20,
+            "SBRC":               0.10,
+            "La Oficina":         0.20,
+            "Negocios":           0.10,
+            "Capital Readiness":  0.20,
+            "Smithsonian":        0.20,
             "Festival del Platano": 0.20,
         },
-        "grants": [
-            {"name": "CITY OF MIAMI", "annual_budget": 56000.00, "classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"]},
-            {"name": "TRUIST", "annual_budget": 11590.00, "classes": ["Smithsonian", "Festival del Platano"]},
+        # CITY OF MIAMI covers all up to $56,000 → TRUIST covers the rest
+        "grant_rules": [
+            {
+                "pool_classes": [
+                    "SBRC", "La Oficina", "Negocios",
+                    "Capital Readiness", "Smithsonian", "Festival del Platano",
+                ],
+                "waterfall": [
+                    {"name": "CITY OF MIAMI", "annual_budget": 56000.00},
+                    {"name": "TRUIST",         "annual_budget": 11590.00},
+                ],
+            },
         ],
         "dental_vision_employer": 0.00,
     },
+
     "Maricarmen": {
         "full_name": "Maricarmen Buraschi",
         "title": "Community Navigator",
         "gusto_last": "Buraschi",
         "gusto_first": "Maricarmen",
         "classes": {
-            "SBRC": 0.20,
-            "Negocios": 0.15,
-            "Capital Readiness": 0.20,
-            "ILB": 0.10,
-            "CPA": 0.15,
+            "SBRC":               0.20,
+            "Negocios":           0.15,
+            "Capital Readiness":  0.20,
+            "ILB":                0.10,
+            "CPA":                0.15,
             "Tradicion en Accion": 0.20,
         },
-        "grants": [
-            {"name": "TRUIST", "annual_budget": 33631.42, "classes": ["SBRC", "Negocios", "Capital Readiness", "ILB", "CPA", "Tradicion en Accion"]},
+        # TRUIST covers all until exhausted → PENDING
+        "grant_rules": [
+            {
+                "pool_classes": [
+                    "SBRC", "Negocios", "Capital Readiness",
+                    "ILB", "CPA", "Tradicion en Accion",
+                ],
+                "waterfall": [
+                    {"name": "TRUIST", "annual_budget": 33631.42},
+                ],
+            },
         ],
         "dental_vision_employer": 0.00,
     },
+
     "Fernando": {
         "full_name": "Fernando Ortiz",
         "title": "Climate & Sustainability Program Manager",
         "gusto_last": "Ortiz",
         "gusto_first": "Fernando",
         "classes": {
-            "ILB": 0.10,
-            "CPA": 0.30,
-            "Tradición": 0.30,
-            "Smithsonian": 0.15,
+            "ILB":                0.10,
+            "CPA":                0.30,
+            "Tradición":          0.30,
+            "Smithsonian":        0.15,
             "Festival del Platano": 0.15,
         },
-        "grants": [
-            {"name": "JPM CHASE", "annual_budget": 25000.00, "classes": ["ILB"]},
-            {"name": "LATINOS", "annual_budget": 25000.00, "classes": ["CPA", "Tradición"]},
-            {"name": "ROBERT WOOD", "annual_budget": 5200.00, "classes": ["Smithsonian", "Festival del Platano"]},
+        # JPM CHASE → LATINOS → ROBERT WOOD (waterfall for all classes)
+        "grant_rules": [
+            {
+                "pool_classes": [
+                    "ILB", "CPA", "Tradición",
+                    "Smithsonian", "Festival del Platano",
+                ],
+                "waterfall": [
+                    {"name": "JPM CHASE",   "annual_budget": 25000.00},
+                    {"name": "LATINOS",     "annual_budget": 25000.00},
+                    {"name": "ROBERT WOOD", "annual_budget": 5200.00},
+                ],
+            },
         ],
-        "note": "Salary: $4,000/mo Jan-Jun, $5,200/mo Jul-Dec. Not in Gusto file yet.",
+        "note": "Salary: $4,000/mo Jan-Jun, $5,200/mo Jul-Dec. Not yet in Gusto.",
         "dental_vision_employer": 0.00,
     },
 }
 
-# Build a lookup by (last_name, first_name) → matrix key
+# Lookup by (last, first) → matrix key
 _GUSTO_LOOKUP: dict[tuple[str, str], str] = {
     (v["gusto_last"].lower(), v["gusto_first"].lower()): k
     for k, v in ALLOCATION_MATRIX.items()
@@ -147,7 +227,6 @@ _GUSTO_LOOKUP: dict[tuple[str, str], str] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_gusto(data: bytes) -> list[dict]:
-    """Return a list of pay periods, each with employee-level cost data."""
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
@@ -161,10 +240,8 @@ def _parse_gusto(data: bytes) -> list[dict]:
 
         if r0 == "Payroll period":
             current = {"period": r1.strip(), "payday": None, "employees": []}
-
         elif r0 == "Pay day" and current is not None:
             current["payday"] = r1.strip()
-
         elif current is not None and r0 not in (
             "", "Payroll period", "Pay day", "Last Name",
             "Payroll Totals", "Employee Earnings",
@@ -173,23 +250,16 @@ def _parse_gusto(data: bytes) -> list[dict]:
                 gross = float(row[7] or 0)
             except (TypeError, ValueError):
                 continue
-
             if not r0 or gross == 0:
                 continue
-
-            emp_taxes = float(row[14] or 0)
-            health = float(row[17] or 0)
-
             current["employees"].append({
-                "last": r0,
-                "first": str(row[1] or "").strip(),
-                "department": str(row[2] or "").strip(),
-                "gross": gross,
-                "employer_taxes": emp_taxes,
-                "health_allowance": health,
-                "total_employer_cost": gross + emp_taxes + health,
+                "last":   r0,
+                "first":  str(row[1] or "").strip(),
+                "dept":   str(row[2] or "").strip(),
+                "gross":          gross,
+                "employer_taxes": float(row[14] or 0),
+                "health_allowance": float(row[17] or 0),
             })
-
         elif r0 == "Payroll Totals" and current is not None:
             periods.append(current)
             current = None
@@ -197,130 +267,207 @@ def _parse_gusto(data: bytes) -> list[dict]:
     return periods
 
 
-def _apply_allocation(periods: list[dict]) -> list[dict]:
-    """Enrich each employee record with class-level allocations."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Waterfall allocation engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
+    """
+    Process periods in order, tracking cumulative grant spend.
+    Returns enriched periods + final budget_status per employee.
+    """
+    # Initialize cumulative budget remaining per employee per grant
+    budget_remaining: dict[str, dict[str, float]] = {}
+    for key, profile in ALLOCATION_MATRIX.items():
+        budget_remaining[key] = {}
+        for pool in profile.get("grant_rules", []):
+            for g in pool["waterfall"]:
+                budget_remaining[key][g["name"]] = g["annual_budget"]
+
     results = []
 
     for period in periods:
-        enriched_employees = []
-        period_class_totals: dict[str, float] = {}
+        enriched_emps = []
         period_grant_totals: dict[str, float] = {}
+        period_class_totals: dict[str, float] = {}
         unmatched = []
 
         for emp in period["employees"]:
-            key = (emp["last"].lower(), emp["first"].lower())
-            matrix_key = _GUSTO_LOOKUP.get(key)
-
-            if not matrix_key:
+            key = _GUSTO_LOOKUP.get(
+                (emp["last"].lower(), emp["first"].lower())
+            )
+            if not key:
                 unmatched.append(f"{emp['first']} {emp['last']}")
-                enriched_employees.append({**emp, "allocation": None, "matrix_key": None})
+                enriched_emps.append({**emp, "matrix_key": None, "allocation": None})
                 continue
 
-            profile = ALLOCATION_MATRIX[matrix_key]
-            total_cost = emp["total_employer_cost"]
-            dental = profile.get("dental_vision_employer", 0)
-            total_with_dental = total_cost + dental
+            profile = ALLOCATION_MATRIX[key]
+            dental = profile.get("dental_vision_employer", 0.0)
+            total_cost = emp["gross"] + emp["employer_taxes"] + emp["health_allowance"] + dental
 
-            class_breakdown = {}
-            for cls_name, pct in profile["classes"].items():
-                amount = round(total_with_dental * pct, 2)
-                class_breakdown[cls_name] = {
-                    "pct": pct,
-                    "amount": amount,
-                    "salary_portion": round(emp["gross"] * pct, 2),
-                    "taxes_portion": round(emp["employer_taxes"] * pct, 2),
+            # ── Step 1: calculate dollar amount per class ──────────────────
+            class_amounts: dict[str, float] = {
+                cls: round(total_cost * pct, 4)
+                for cls, pct in profile["classes"].items()
+            }
+
+            # ── Step 2: apply waterfall per pool ──────────────────────────
+            # grant_charges[grant_name] = amount charged this period
+            grant_charges: dict[str, float] = {}
+            pending_amount = 0.0
+            # class → which grant covered it (for display)
+            class_grant_coverage: dict[str, str] = {}
+
+            for pool in profile.get("grant_rules", []):
+                pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
+                remaining = pool_cost
+
+                for g in pool["waterfall"]:
+                    gname = g["name"]
+                    available = budget_remaining[key].get(gname, 0.0)
+                    if available <= 0 or remaining <= 0:
+                        continue
+                    used = min(remaining, available)
+                    budget_remaining[key][gname] = round(available - used, 4)
+                    grant_charges[gname] = round(grant_charges.get(gname, 0.0) + used, 4)
+                    remaining = round(remaining - used, 4)
+                    if remaining <= 0:
+                        break
+
+                if remaining > 0.005:   # more than half a cent → PENDING
+                    pending_amount = round(pending_amount + remaining, 4)
+                    grant_charges["PENDING"] = round(
+                        grant_charges.get("PENDING", 0.0) + remaining, 4
+                    )
+
+            # Assign class → grant label for display (proportional to class cost)
+            for pool in profile.get("grant_rules", []):
+                pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
+                if pool_cost == 0:
+                    for c in pool["pool_classes"]:
+                        class_grant_coverage[c] = "—"
+                    continue
+                # Determine which grant(s) this pool drew from
+                pool_grants_used = [
+                    g["name"] for g in pool["waterfall"]
+                    if grant_charges.get(g["name"], 0) > 0
+                ]
+                if "PENDING" in grant_charges and pending_amount > 0:
+                    pool_grants_used.append("PENDING")
+                label = " → ".join(pool_grants_used) if pool_grants_used else "PENDING"
+                for c in pool["pool_classes"]:
+                    class_grant_coverage[c] = label
+
+            # Build per-class breakdown dict
+            class_breakdown: dict[str, dict] = {}
+            for cls, amt in class_amounts.items():
+                pct = profile["classes"][cls]
+                class_breakdown[cls] = {
+                    "pct":             pct,
+                    "amount":          round(amt, 2),
+                    "salary_portion":  round(emp["gross"] * pct, 2),
+                    "taxes_portion":   round(emp["employer_taxes"] * pct, 2),
                     "benefits_portion": round((emp["health_allowance"] + dental) * pct, 2),
+                    "grant":           class_grant_coverage.get(cls, "—"),
                 }
-                period_class_totals[cls_name] = period_class_totals.get(cls_name, 0) + amount
-
-            # Grant totals: sum class amounts that belong to each grant
-            grant_breakdown = {}
-            for grant in profile["grants"]:
-                grant_amount = sum(
-                    class_breakdown[c]["amount"]
-                    for c in grant["classes"]
-                    if c in class_breakdown
-                )
-                grant_breakdown[grant["name"]] = {
-                    "amount": round(grant_amount, 2),
-                    "annual_budget": grant.get("annual_budget"),
-                    "classes": grant["classes"],
-                }
-                period_grant_totals[grant["name"]] = (
-                    period_grant_totals.get(grant["name"], 0) + grant_amount
+                period_class_totals[cls] = round(
+                    period_class_totals.get(cls, 0.0) + amt, 2
                 )
 
-            enriched_employees.append({
+            # Round grant charges
+            grant_charges = {k: round(v, 2) for k, v in grant_charges.items()}
+
+            # Accumulate period-level grant totals
+            for gname, amt in grant_charges.items():
+                period_grant_totals[gname] = round(
+                    period_grant_totals.get(gname, 0.0) + amt, 2
+                )
+
+            # Budget snapshot after this period
+            budget_snapshot = {
+                gname: round(budget_remaining[key].get(gname, 0.0), 2)
+                for pool in profile.get("grant_rules", [])
+                for g in pool["waterfall"]
+                for gname in [g["name"]]
+            }
+
+            enriched_emps.append({
                 **emp,
-                "matrix_key": matrix_key,
-                "title": profile["title"],
-                "total_with_dental": round(total_with_dental, 2),
+                "matrix_key":            key,
+                "title":                 profile["title"],
+                "full_name":             profile["full_name"],
+                "total_cost":            round(total_cost, 2),
                 "dental_vision_employer": dental,
                 "allocation": {
-                    "classes": class_breakdown,
-                    "grants": grant_breakdown,
+                    "classes":       class_breakdown,
+                    "grant_charges": grant_charges,
+                    "pending":       round(pending_amount, 2),
                 },
+                "budget_remaining": budget_snapshot,
                 "note": profile.get("note"),
             })
 
-        # Round period totals
-        period_class_totals = {k: round(v, 2) for k, v in period_class_totals.items()}
-        period_grant_totals = {k: round(v, 2) for k, v in period_grant_totals.items()}
-
         results.append({
             **period,
-            "employees": enriched_employees,
-            "period_class_totals": period_class_totals,
-            "period_grant_totals": period_grant_totals,
-            "period_total_cost": round(sum(
-                e["total_employer_cost"] for e in period["employees"]
-            ), 2),
+            "employees":           enriched_emps,
+            "period_class_totals": {k: round(v, 2) for k, v in period_class_totals.items()},
+            "period_grant_totals": {k: round(v, 2) for k, v in period_grant_totals.items()},
+            "period_total_cost":   round(
+                sum(e.get("total_cost", 0) for e in enriched_emps), 2
+            ),
             "unmatched_employees": unmatched,
         })
 
-    return results
+    # Final budget status per employee
+    budget_status = {
+        key: {
+            gname: {
+                "original": g["annual_budget"],
+                "remaining": round(budget_remaining[key].get(gname, 0.0), 2),
+                "used": round(g["annual_budget"] - budget_remaining[key].get(gname, 0.0), 2),
+                "exhausted": budget_remaining[key].get(gname, 0.0) <= 0,
+            }
+            for pool in profile.get("grant_rules", [])
+            for g in pool["waterfall"]
+            for gname in [g["name"]]
+        }
+        for key, profile in ALLOCATION_MATRIX.items()
+    }
 
+    return results, budget_status
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Journal Entry builder
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _build_journal_entry(period_data: dict) -> dict:
-    """Build a QBO-style journal entry for a pay period."""
     lines = []
-    period_label = period_data["period"]
-    payday = period_data.get("payday", "")
-
     for emp in period_data["employees"]:
         if not emp.get("allocation"):
             continue
-
-        for cls_name, cls_data in emp["allocation"]["classes"].items():
-            # Find which grant covers this class
-            covering_grant = "Unallocated"
-            for grant in ALLOCATION_MATRIX[emp["matrix_key"]]["grants"]:
-                if cls_name in grant["classes"]:
-                    covering_grant = grant["name"]
-                    break
-
+        for cls, data in emp["allocation"]["classes"].items():
             lines.append({
-                "type": "debit",
-                "account": "Salaries & Wages Expense",
-                "class": cls_name,
-                "customer": covering_grant,
-                "employee": emp["full_name"] if "full_name" in emp else f"{emp['first']} {emp['last']}",
-                "description": f"Payroll {period_label} – {emp.get('title', emp['first'])} / {cls_name}",
-                "amount": cls_data["amount"],
+                "type":        "debit",
+                "account":     "Salaries & Wages Expense",
+                "class":       cls,
+                "customer":    data["grant"],
+                "employee":    emp.get("full_name", f"{emp['first']} {emp['last']}"),
+                "description": f"{period_data['period']} – {emp.get('title', emp['first'])} / {cls}",
+                "amount":      data["amount"],
             })
 
-    total_debit = round(sum(l["amount"] for l in lines), 2)
-
+    total = round(sum(l["amount"] for l in lines), 2)
     return {
-        "date": payday,
-        "memo": f"Payroll allocation – {period_label}",
-        "total": total_debit,
+        "date":        period_data.get("payday", ""),
+        "memo":        f"Payroll allocation – {period_data['period']}",
+        "total":       total,
         "debit_lines": lines,
         "credit_line": {
-            "type": "credit",
-            "account": "Wages Payable",
-            "description": f"Payroll {period_label}",
-            "amount": total_debit,
+            "type":        "credit",
+            "account":     "Wages Payable",
+            "description": f"Payroll {period_data['period']}",
+            "amount":      total,
         },
     }
 
@@ -331,15 +478,14 @@ def _build_journal_entry(period_data: dict) -> dict:
 
 @router.get("/matrix")
 async def get_matrix() -> dict:
-    """Return the stored allocation matrix."""
     return {
         "matrix": {
             k: {
-                "full_name": v["full_name"],
-                "title": v["title"],
-                "classes": v["classes"],
-                "grants": v["grants"],
-                "note": v.get("note"),
+                "full_name":   v["full_name"],
+                "title":       v["title"],
+                "classes":     v["classes"],
+                "grant_rules": v["grant_rules"],
+                "note":        v.get("note"),
             }
             for k, v in ALLOCATION_MATRIX.items()
         },
@@ -350,42 +496,37 @@ async def get_matrix() -> dict:
 @router.post("/process")
 async def process_payroll(
     file: UploadFile = File(...),
-    period_index: Optional[int] = Query(None, description="0-based index of period to return (None = all)"),
+    period_index: Optional[int] = Query(None),
     include_journal_entry: bool = Query(False),
 ) -> dict:
-    """
-    Upload a Gusto payroll Excel export.
-    Returns all pay periods with class/grant allocation breakdown.
-    """
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "Please upload a .xlsx file from Gusto.")
 
     data = await file.read()
-
     try:
-        periods = _parse_gusto(data)
+        raw_periods = _parse_gusto(data)
     except Exception as e:
         raise HTTPException(422, f"Could not parse Gusto file: {e}")
 
-    if not periods:
+    if not raw_periods:
         raise HTTPException(422, "No pay periods found in the uploaded file.")
 
-    enriched = _apply_allocation(periods)
+    enriched, budget_status = _apply_waterfall(raw_periods)
 
-    # Filter to a single period if requested
     if period_index is not None:
         if period_index < 0 or period_index >= len(enriched):
-            raise HTTPException(404, f"Period index {period_index} out of range (0–{len(enriched)-1}).")
+            raise HTTPException(404, f"Period {period_index} out of range (0–{len(enriched)-1}).")
         result_periods = [enriched[period_index]]
     else:
         result_periods = enriched
 
     response: dict = {
-        "total_periods": len(periods),
-        "periods": result_periods,
+        "total_periods": len(raw_periods),
+        "periods":       result_periods,
+        "budget_status": budget_status,
     }
 
-    if include_journal_entry and result_periods:
+    if include_journal_entry:
         response["journal_entries"] = [
             _build_journal_entry(p) for p in result_periods
         ]

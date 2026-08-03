@@ -320,30 +320,27 @@ export interface PayrollClassAllocation {
   salary_portion: number
   taxes_portion: number
   benefits_portion: number
-}
-
-export interface PayrollGrantAllocation {
-  amount: number
-  annual_budget: number | null
-  classes: string[]
+  grant: string   // which grant covers this class (waterfall label)
 }
 
 export interface PayrollEmployee {
   last: string
   first: string
-  department: string
+  full_name?: string
+  dept?: string
   gross: number
   employer_taxes: number
   health_allowance: number
-  total_employer_cost: number
+  total_cost?: number
   matrix_key: string | null
   title?: string
-  total_with_dental?: number
   dental_vision_employer?: number
   note?: string
+  budget_remaining?: Record<string, number>
   allocation: {
     classes: Record<string, PayrollClassAllocation>
-    grants: Record<string, PayrollGrantAllocation>
+    grant_charges: Record<string, number>   // grant → total charged this period
+    pending: number
   } | null
 }
 
@@ -355,6 +352,13 @@ export interface PayrollPeriod {
   period_grant_totals: Record<string, number>
   period_total_cost: number
   unmatched_employees: string[]
+}
+
+export interface PayrollBudgetInfo {
+  original: number
+  used: number
+  remaining: number
+  exhausted: boolean
 }
 
 export interface PayrollJELine {
@@ -377,6 +381,7 @@ export interface PayrollJournalEntry {
 
 export interface PayrollProcessResponse {
   total_periods: number
+  budget_status: Record<string, Record<string, PayrollBudgetInfo>>
   periods: PayrollPeriod[]
   journal_entries?: PayrollJournalEntry[]
 }
