@@ -790,6 +790,20 @@ def _build_qbo_expense_payloads(
     return all_payloads, all_warnings
 
 
+def _extract_http_status(exc: Exception) -> str:
+    """Return HTTP status code as a string from tenacity RetryError or httpx HTTPStatusError."""
+    # tenacity wraps the real exception inside last_attempt
+    last = getattr(exc, "last_attempt", None)
+    if last is not None:
+        try:
+            last.result()
+        except Exception as inner:
+            exc = inner
+    if hasattr(exc, "response") and hasattr(exc.response, "status_code"):
+        return str(exc.response.status_code)
+    return "unknown"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /payroll/post-to-qbo
 # ─────────────────────────────────────────────────────────────────────────────
@@ -863,12 +877,22 @@ async def post_payroll_to_qbo(
     # ── 3. Fetch QBO reference data ───────────────────────────────────────────
     try:
         qbo_vendors   = await qbo.get_vendors()
+    except Exception as e:
+        _status = _extract_http_status(e)
+        raise HTTPException(502, f"QBO error fetching vendors (HTTP {_status}). Try reconnecting QBO in Settings.")
+    try:
         qbo_accounts  = await qbo.get_chart_of_accounts()
         qbo_classes   = await qbo.get_classes()
         qbo_customers = await qbo.get_customers()
-        qbo_banks     = await qbo.get_bank_accounts()
     except Exception as e:
-        raise HTTPException(502, f"QBO API error fetching reference data: {e}")
+        _status = _extract_http_status(e)
+        raise HTTPException(502, f"QBO error fetching reference data (HTTP {_status}): {type(e).__name__}")
+
+    # Bank accounts are included in chart of accounts — no separate call needed
+    qbo_banks = [
+        a for a in qbo_accounts
+        if a.get("AccountType") in ("Bank", "Credit Card")
+    ]
 
     # ── 4. Match names → QBO IDs (also check FullyQualifiedName for sub-customers) ──
     def _match_vendor(name: str) -> dict | None:
