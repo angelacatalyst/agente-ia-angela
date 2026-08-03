@@ -193,6 +193,21 @@ export const api = {
       apiClient.get('/qbo/data/projects/pl', { params: { realm_id: realmId, customer_id: customerId, start_date: startDate, end_date: endDate } }).then(r => r.data),
   },
 
+  payroll: {
+    matrix: () =>
+      apiClient.get<PayrollMatrixResponse>('/payroll/matrix').then(r => r.data),
+    process: (file: File, periodIndex?: number, includeJE = false) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      const params: Record<string, unknown> = { include_journal_entry: includeJE }
+      if (periodIndex !== undefined) params.period_index = periodIndex
+      return apiClient.post<PayrollProcessResponse>('/payroll/process', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params,
+      }).then(r => r.data)
+    },
+  },
+
   integrations: {
     qboStatus: (realmId: string) =>
       apiClient.get('/integrations/qbo/status', { params: { realm_id: realmId } }).then(r => r.data),
@@ -295,4 +310,86 @@ export interface QBOProjectsResponse {
   total_projects: number
   total_donors: number
   fetched_at: string
+}
+
+// ── Payroll types ─────────────────────────────────────────────────────────────
+
+export interface PayrollClassAllocation {
+  pct: number
+  amount: number
+  salary_portion: number
+  taxes_portion: number
+  benefits_portion: number
+}
+
+export interface PayrollGrantAllocation {
+  amount: number
+  annual_budget: number | null
+  classes: string[]
+}
+
+export interface PayrollEmployee {
+  last: string
+  first: string
+  department: string
+  gross: number
+  employer_taxes: number
+  health_allowance: number
+  total_employer_cost: number
+  matrix_key: string | null
+  title?: string
+  total_with_dental?: number
+  dental_vision_employer?: number
+  note?: string
+  allocation: {
+    classes: Record<string, PayrollClassAllocation>
+    grants: Record<string, PayrollGrantAllocation>
+  } | null
+}
+
+export interface PayrollPeriod {
+  period: string
+  payday: string
+  employees: PayrollEmployee[]
+  period_class_totals: Record<string, number>
+  period_grant_totals: Record<string, number>
+  period_total_cost: number
+  unmatched_employees: string[]
+}
+
+export interface PayrollJELine {
+  type: 'debit' | 'credit'
+  account: string
+  class?: string
+  customer?: string
+  employee?: string
+  description: string
+  amount: number
+}
+
+export interface PayrollJournalEntry {
+  date: string
+  memo: string
+  total: number
+  debit_lines: PayrollJELine[]
+  credit_line: PayrollJELine
+}
+
+export interface PayrollProcessResponse {
+  total_periods: number
+  periods: PayrollPeriod[]
+  journal_entries?: PayrollJournalEntry[]
+}
+
+export interface PayrollMatrixEmployee {
+  full_name: string
+  title: string
+  classes: Record<string, number>
+  grants: Array<{ name: string; annual_budget: number | null; classes: string[] }>
+  note?: string
+}
+
+export interface PayrollMatrixResponse {
+  matrix: Record<string, PayrollMatrixEmployee>
+  employee_count: number
 }
