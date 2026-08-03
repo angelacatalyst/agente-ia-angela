@@ -66,6 +66,9 @@ export function PayrollPage() {
   const [qboRealm, setQboRealm] = useState('')
   const [qboVendor, setQboVendor] = useState('Gusto')
   const [qboAccount, setQboAccount] = useState('Salaries & Wages')
+  const [qboBankAccount, setQboBankAccount] = useState('Payroll')
+  const [qboTaxAccount, setQboTaxAccount] = useState('Payroll Tax')
+  const [qboHealthAccount, setQboHealthAccount] = useState('Payroll Health')
   const [qboPreview, setQboPreview] = useState<PayrollQBOPreviewResponse | null>(null)
   const [qboPreviewLoading, setQboPreviewLoading] = useState(false)
   const [qboPosting, setQboPosting] = useState(false)
@@ -86,6 +89,14 @@ export function PayrollPage() {
     }
   }
 
+  const qboOpts = () => ({
+    expenseAccount: qboAccount,
+    payrollVendor: qboVendor,
+    bankAccount: qboBankAccount,
+    taxLiabilityAccount: qboTaxAccount,
+    healthLiabilityAccount: qboHealthAccount,
+  })
+
   const runQboPreview = async () => {
     if (!fileRef.current?.files?.[0] || !qboRealm) return
     setQboPreviewLoading(true)
@@ -93,8 +104,7 @@ export function PayrollPage() {
     setQboError(null)
     try {
       const preview = await api.payroll.previewQBO(
-        fileRef.current.files[0], qboRealm, selectedPeriodIdx,
-        { expenseAccount: qboAccount, payrollVendor: qboVendor },
+        fileRef.current.files[0], qboRealm, selectedPeriodIdx, qboOpts(),
       )
       setQboPreview(preview)
     } catch (err: any) {
@@ -110,8 +120,7 @@ export function PayrollPage() {
     setQboError(null)
     try {
       const result = await api.payroll.postToQBO(
-        fileRef.current.files[0], qboRealm, selectedPeriodIdx,
-        { expenseAccount: qboAccount, payrollVendor: qboVendor },
+        fileRef.current.files[0], qboRealm, selectedPeriodIdx, qboOpts(),
       )
       setQboPostResult(result)
     } catch (err: any) {
@@ -834,35 +843,46 @@ export function PayrollPage() {
             <div className="flex-1 p-5 space-y-4">
               {/* Success state */}
               {qboPostResult && (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-3">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 size={18} className="text-emerald-600" />
-                    <p className="text-sm font-bold text-emerald-800">Bill created in QBO!</p>
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 size={16} className="text-emerald-600" />
+                      <p className="text-sm font-bold text-emerald-800">
+                        {qboPostResult.expenses_created.length} Expenses created in QBO
+                      </p>
+                    </div>
+                    <p className="text-sm font-bold text-emerald-900">{fmt(qboPostResult.total_posted)}</p>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    {[
-                      ['Period', qboPostResult.period],
-                      ['Doc #', qboPostResult.doc_number],
-                      ['Lines', String(qboPostResult.line_count)],
-                      ['Total', fmt(qboPostResult.bill_total ?? 0)],
-                    ].map(([label, val]) => (
-                      <div key={label} className="rounded-lg bg-emerald-100/60 px-3 py-2">
-                        <p className="text-emerald-600">{label}</p>
-                        <p className="font-semibold text-emerald-900">{val}</p>
+
+                  <div className="space-y-2">
+                    {qboPostResult.expenses_created.map((exp) => (
+                      <div key={exp.expense_id} className="rounded-lg border border-surface-200 px-3 py-2 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-semibold text-surface-800">{exp.employee_name}</p>
+                          <p className="text-[11px] text-surface-400">{exp.doc_number} · {exp.line_count} lines</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-bold text-surface-900">{fmt(exp.total ?? 0)}</p>
+                          <a href={exp.qbo_link} target="_blank" rel="noopener noreferrer"
+                            className="text-primary-600 hover:text-primary-700">
+                            <ExternalLink size={12} />
+                          </a>
+                        </div>
                       </div>
                     ))}
                   </div>
-                  <a
-                    href={qboPostResult.qbo_link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:underline"
-                  >
-                    <ExternalLink size={12} /> Open in QuickBooks
-                  </a>
+
+                  {qboPostResult.errors.length > 0 && (
+                    <div className="rounded-lg bg-red-50 border border-red-200 p-3 space-y-1">
+                      <p className="text-[11px] font-semibold text-red-700">Errors</p>
+                      {qboPostResult.errors.map((e, i) => (
+                        <p key={i} className="text-[11px] text-red-700">✕ {e}</p>
+                      ))}
+                    </div>
+                  )}
                   {qboPostResult.warnings.length > 0 && (
                     <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-1">
-                      {qboPostResult.warnings.map((w, i) => (
+                      {qboPostResult.warnings.slice(0, 4).map((w, i) => (
                         <p key={i} className="text-[11px] text-amber-700">⚠ {w}</p>
                       ))}
                     </div>
@@ -904,26 +924,31 @@ export function PayrollPage() {
                     )}
                   </div>
 
-                  {/* Step 2: Vendor + Account */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-semibold text-surface-600">Vendor in QBO</label>
-                      <input
-                        value={qboVendor}
-                        onChange={e => { setQboVendor(e.target.value); setQboPreview(null) }}
-                        className="w-full rounded-lg border border-surface-200 px-3 py-2 text-xs focus:border-primary-400 focus:outline-none"
-                        placeholder="Gusto"
-                      />
+                  {/* Step 2: Account settings */}
+                  <div className="rounded-xl border border-surface-200 p-3 space-y-2.5">
+                    <p className="text-[11px] font-semibold text-surface-500 uppercase tracking-wider">QBO Account Names</p>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {[
+                        { label: 'Vendor (Payee)', val: qboVendor,        set: setQboVendor,        ph: 'Gusto' },
+                        { label: 'Bank Account',   val: qboBankAccount,   set: setQboBankAccount,   ph: '1112 Cash:Payroll' },
+                        { label: 'Expense Account',val: qboAccount,       set: setQboAccount,       ph: '6110 Personnel:Salaries' },
+                        { label: 'Tax Liability',  val: qboTaxAccount,    set: setQboTaxAccount,    ph: '2131 Payroll Tax' },
+                        { label: 'Health Liability',val: qboHealthAccount,set: setQboHealthAccount, ph: '2136 Health Benefits' },
+                      ].map(({ label, val, set, ph }) => (
+                        <div key={label} className="space-y-1">
+                          <label className="text-[10px] font-semibold text-surface-500">{label}</label>
+                          <input
+                            value={val}
+                            onChange={e => { set(e.target.value); setQboPreview(null) }}
+                            className="w-full rounded-lg border border-surface-200 px-2.5 py-1.5 text-[11px] focus:border-primary-400 focus:outline-none"
+                            placeholder={ph}
+                          />
+                        </div>
+                      ))}
                     </div>
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-semibold text-surface-600">Expense Account</label>
-                      <input
-                        value={qboAccount}
-                        onChange={e => { setQboAccount(e.target.value); setQboPreview(null) }}
-                        className="w-full rounded-lg border border-surface-200 px-3 py-2 text-xs focus:border-primary-400 focus:outline-none"
-                        placeholder="Salaries & Wages"
-                      />
-                    </div>
+                    <p className="text-[10px] text-surface-400">
+                      Enter partial names — the agent uses fuzzy matching to find the exact QBO account.
+                    </p>
                   </div>
 
                   {/* Preview button */}
@@ -951,94 +976,89 @@ export function PayrollPage() {
                   {/* Preview results */}
                   {qboPreview && (
                     <div className="space-y-3">
-                      {/* Lookup status grid */}
+                      {/* Lookup status */}
                       <div className="rounded-xl border border-surface-200 overflow-hidden">
                         <div className="px-3 py-2 bg-surface-50 border-b border-surface-100">
                           <p className="text-[11px] font-semibold text-surface-600 uppercase tracking-wider">QBO Lookups</p>
                         </div>
-
-                        {/* Vendor + Account */}
                         <div className="divide-y divide-surface-50">
-                          {[
-                            { label: 'Vendor', info: qboPreview.qbo_lookups.vendor },
-                            { label: 'Account', info: qboPreview.qbo_lookups.expense_account },
-                          ].map(({ label, info }) => (
-                            <div key={label} className="flex items-center justify-between px-3 py-2">
-                              <span className="text-xs text-surface-500">{label}: <span className="font-medium text-surface-700">"{info.searched}"</span></span>
+                          {([
+                            ['Vendor', qboPreview.qbo_lookups.vendor],
+                            ['Bank Account', qboPreview.qbo_lookups.bank_account],
+                            ['Expense Account', qboPreview.qbo_lookups.expense_account],
+                            ['Tax Liability', qboPreview.qbo_lookups.tax_liability],
+                            ['Health Liability', qboPreview.qbo_lookups.health_liability],
+                          ] as [string, PayrollQBOLookup][]).map(([label, info]) => (
+                            <div key={label} className="flex items-center justify-between px-3 py-1.5">
+                              <span className="text-[11px] text-surface-500">{label}: <span className="font-medium text-surface-700">"{info.searched}"</span></span>
                               {info.found
-                                ? <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 rounded-full px-2 py-0.5"><CheckCircle2 size={10} /> {info.qbo_name}</span>
-                                : <span className="text-[11px] font-semibold text-red-600 bg-red-50 rounded-full px-2 py-0.5">Not found</span>
+                                ? <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 rounded-full px-2 py-0.5 border border-emerald-200"><CheckCircle2 size={9} /> {info.qbo_name}</span>
+                                : <span className="text-[10px] font-semibold text-red-600 bg-red-50 rounded-full px-2 py-0.5 border border-red-200">Not found</span>
                               }
                             </div>
                           ))}
                         </div>
-
                         {/* Classes */}
                         <div className="px-3 py-2 bg-surface-50/50 border-t border-surface-100">
                           <p className="text-[10px] font-semibold text-surface-400 mb-1.5 uppercase tracking-wider">Classes</p>
                           <div className="flex flex-wrap gap-1.5">
                             {Object.entries(qboPreview.qbo_lookups.classes).map(([cls, info]) => (
-                              <span key={cls} className={cn(
-                                'inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
-                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200',
-                              )}>
-                                {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}
-                                {cls}
+                              <span key={cls} className={cn('inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
+                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200')}>
+                                {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}{cls}
                               </span>
                             ))}
                           </div>
                         </div>
-
-                        {/* Grants / Customers */}
+                        {/* Grants */}
                         <div className="px-3 py-2 border-t border-surface-100">
                           <p className="text-[10px] font-semibold text-surface-400 mb-1.5 uppercase tracking-wider">Grants (QBO Customers)</p>
                           <div className="flex flex-wrap gap-1.5">
                             {Object.entries(qboPreview.qbo_lookups.customers).map(([g, info]) => (
-                              <span key={g} className={cn(
-                                'inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
-                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200',
-                              )}>
+                              <span key={g} className={cn('inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
+                                info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200')}>
                                 {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}
-                                {g}{info.found && info.qbo_name !== g ? ` → ${info.qbo_name}` : ''}
+                                {g}{info.found && info.qbo_name && info.qbo_name !== g ? ` → ${info.qbo_name}` : ''}
                               </span>
                             ))}
                           </div>
                         </div>
                       </div>
 
-                      {/* Bill summary */}
-                      <div className="rounded-xl border border-surface-200 p-3 flex items-center justify-between">
-                        <div>
-                          <p className="text-xs font-semibold text-surface-800">{qboPreview.line_count} bill lines</p>
-                          <p className="text-[11px] text-surface-400">Payday: {qboPreview.payday}</p>
+                      {/* Per-employee expense preview */}
+                      <div className="rounded-xl border border-surface-200 overflow-hidden">
+                        <div className="px-3 py-2 bg-surface-50 border-b border-surface-100 flex items-center justify-between">
+                          <p className="text-[11px] font-semibold text-surface-600 uppercase tracking-wider">
+                            {qboPreview.employee_count} Expenses to Create
+                          </p>
+                          <p className="text-xs font-bold text-surface-900">{fmt(qboPreview.grand_total)}</p>
                         </div>
-                        <div className="text-right">
-                          <p className="text-sm font-bold text-surface-900">{fmt(qboPreview.bill_total)}</p>
-                          <p className="text-[11px] text-surface-400">bill total</p>
+                        <div className="divide-y divide-surface-50">
+                          {qboPreview.expenses_preview.map((ep) => (
+                            <div key={ep.employee_name} className="px-3 py-2">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-semibold text-surface-800">{ep.employee_name}</p>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] text-surface-400">{ep.total_lines} lines</span>
+                                  <span className="text-xs font-bold text-surface-900">{fmt(ep.total)}</span>
+                                </div>
+                              </div>
+                              <p className="text-[10px] text-surface-400 mt-0.5">{ep.doc_number}</p>
+                              {/* First 2 lines preview */}
+                              {ep.lines.slice(0, 2).map(line => (
+                                <div key={line.Id} className="flex items-center justify-between mt-0.5 pl-2">
+                                  <p className="text-[10px] text-surface-500 truncate max-w-[280px]">{line.Description}</p>
+                                  <p className={cn('text-[10px] font-medium shrink-0 ml-2',
+                                    line.Amount < 0 ? 'text-red-500' : 'text-surface-600')}>{fmt(line.Amount)}</p>
+                                </div>
+                              ))}
+                              {ep.total_lines > 2 && (
+                                <p className="text-[10px] text-surface-400 pl-2 mt-0.5">+ {ep.total_lines - 2} more…</p>
+                              )}
+                            </div>
+                          ))}
                         </div>
                       </div>
-
-                      {/* Bill line preview (collapsed, max 6) */}
-                      {qboPreview.bill_preview.Line.length > 0 && (
-                        <div className="rounded-xl border border-surface-200 overflow-hidden">
-                          <div className="px-3 py-2 bg-surface-50 border-b border-surface-100">
-                            <p className="text-[11px] font-semibold text-surface-600 uppercase tracking-wider">Bill Lines Preview</p>
-                          </div>
-                          <div className="divide-y divide-surface-50">
-                            {qboPreview.bill_preview.Line.slice(0, 8).map((line) => (
-                              <div key={line.Id} className="flex items-center justify-between px-3 py-1.5">
-                                <p className="text-[11px] text-surface-600 truncate max-w-[300px]">{line.Description}</p>
-                                <p className="text-[11px] font-semibold text-surface-900 shrink-0 ml-2">{fmt(line.Amount)}</p>
-                              </div>
-                            ))}
-                            {qboPreview.bill_preview.Line.length > 8 && (
-                              <div className="px-3 py-1.5 text-[11px] text-surface-400 bg-surface-50">
-                                + {qboPreview.bill_preview.Line.length - 8} more lines…
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
 
                       {/* Warnings */}
                       {qboPreview.warnings.length > 0 && (

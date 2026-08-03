@@ -596,138 +596,198 @@ def _best_qbo_match(
     return None
 
 
-def _get_bill_lines(period: dict) -> list[dict]:
+def _get_expense_lines_for_emp(emp: dict) -> list[dict]:
     """
-    Return flat list of {employee_name, cls, grant, amount, description}
-    ready for QBO Bill lines.
-
-    Each class cost is split proportionally across the grants that covered
-    its pool, so the totals always add up correctly even mid-waterfall.
+    Return flat list of {cls, grant, amount} for one employee.
+    Splits each class cost proportionally across the grants that covered its pool.
     """
     rows: list[dict] = []
+    key = emp.get("matrix_key")
+    if not key or not emp.get("allocation"):
+        return rows
 
-    for emp in period["employees"]:
-        if not emp.get("allocation"):
+    profile = ALLOCATION_MATRIX[key]
+    class_amounts = {
+        cls: data["amount"]
+        for cls, data in emp["allocation"]["classes"].items()
+    }
+    grant_charges = emp["allocation"]["grant_charges"]
+
+    for pool in profile.get("grant_rules", []):
+        pool_classes = pool["pool_classes"]
+        pool_total = sum(class_amounts.get(c, 0.0) for c in pool_classes)
+        if pool_total == 0:
             continue
 
-        key = emp["matrix_key"]
-        if not key:
-            continue
-        profile = ALLOCATION_MATRIX[key]
-        class_amounts = {
-            cls: data["amount"]
-            for cls, data in emp["allocation"]["classes"].items()
-        }
-        grant_charges = emp["allocation"]["grant_charges"]
+        pool_grants: list[tuple[str, float]] = []
+        for g in pool["waterfall"]:
+            amt = grant_charges.get(g["name"], 0.0)
+            if amt > 0:
+                pool_grants.append((g["name"], amt))
 
-        for pool in profile.get("grant_rules", []):
-            pool_classes = pool["pool_classes"]
-            pool_total = sum(class_amounts.get(c, 0.0) for c in pool_classes)
-            if pool_total == 0:
+        pool_covered = sum(a for _, a in pool_grants)
+        pool_pending = round(pool_total - pool_covered, 4)
+        if pool_pending > 0.005:
+            pool_grants.append(("PENDING", pool_pending))
+
+        for cls in pool_classes:
+            class_amt = class_amounts.get(cls, 0.0)
+            if class_amt == 0:
                 continue
-
-            # Determine how much each grant covered for this pool.
-            # Grants are unique to their pool, so grant_charges[name] maps 1:1.
-            pool_grants: list[tuple[str, float]] = []
-            for g in pool["waterfall"]:
-                amt = grant_charges.get(g["name"], 0.0)
-                if amt > 0:
-                    pool_grants.append((g["name"], amt))
-
-            # Compute per-pool pending (not the shared cross-pool total)
-            pool_covered = sum(a for _, a in pool_grants)
-            pool_pending = round(pool_total - pool_covered, 4)
-            if pool_pending > 0.005:
-                pool_grants.append(("PENDING", pool_pending))
-
-            # Split each class proportionally across grants
-            for cls in pool_classes:
-                class_amt = class_amounts.get(cls, 0.0)
-                if class_amt == 0:
-                    continue
-                ratio = class_amt / pool_total
-                emp_name = emp.get("full_name", f"{emp['first']} {emp['last']}")
-
-                for gname, pool_grant_amt in pool_grants:
-                    line_amt = round(pool_grant_amt * ratio, 2)
-                    if line_amt <= 0:
-                        continue
-                    rows.append({
-                        "employee_name": emp_name,
-                        "cls": cls,
-                        "grant": gname,
-                        "amount": line_amt,
-                        "description": f"{emp_name} / {cls}",
-                    })
+            ratio = class_amt / pool_total
+            for gname, pool_grant_amt in pool_grants:
+                line_amt = round(pool_grant_amt * ratio, 2)
+                if line_amt > 0:
+                    rows.append({"cls": cls, "grant": gname, "amount": line_amt})
 
     return rows
 
 
-def _build_qbo_bill_payload(
+def _get_bill_lines(period: dict) -> list[dict]:
+    """Kept for compatibility — flat list across all employees."""
+    rows: list[dict] = []
+    for emp in period["employees"]:
+        emp_name = emp.get("full_name", f"{emp['first']} {emp['last']}")
+        for row in _get_expense_lines_for_emp(emp):
+            rows.append({**row, "employee_name": emp_name, "description": f"{emp_name} / {row['cls']}"})
+    return rows
+
+
+def _build_qbo_expense_payloads(
     period: dict,
+    bank_account_id: str,
     vendor_id: str,
-    account_id: str,
-    class_map: dict[str, str],    # our class name → QBO class Id
-    customer_map: dict[str, str], # grant name → QBO customer Id
+    expense_account_id: str,
+    class_map: dict[str, str],          # our class name → QBO class Id
+    customer_map: dict[str, str],        # grant name → QBO customer Id
+    tax_liability_id: str | None,        # QBO account for employer FICA
+    health_liability_id: str | None,     # QBO account for health + dental
     include_pending: bool = False,
-) -> tuple[dict, list[str]]:
-    """Build a QBO Bill payload dict. Returns (payload, warnings)."""
-    lines = []
-    warnings: list[str] = []
-    bill_lines = _get_bill_lines(period)
+) -> tuple[list[dict], list[str]]:
+    """
+    Build one QBO Purchase (Expense) payload per employee.
+    Each expense has:
+      + Positive lines:  one per (class, grant) allocation
+      - Negative lines:  employer FICA and health/dental liabilities
+    Returns (list_of_employee_payloads, all_warnings).
+    Each item in the list is:
+      { employee_name, matrix_key, payload, warnings, line_count, total }
+    """
+    all_payloads: list[dict] = []
+    all_warnings: list[str] = []
 
-    for i, row in enumerate(bill_lines, start=1):
-        gname = row["grant"]
-        cls   = row["cls"]
-        amt   = row["amount"]
-
-        if gname == "PENDING":
-            if not include_pending:
-                warnings.append(
-                    f"{row['employee_name']} / {cls}: PENDING — no grant assigned, skipped."
+    for emp in period["employees"]:
+        if not emp.get("allocation") or not emp.get("matrix_key"):
+            if emp.get("allocation") is None:
+                all_warnings.append(
+                    f"{emp.get('first', '')} {emp.get('last', '')} not in matrix — skipped."
                 )
-                continue
-            customer_ref = None
-        else:
-            cid = customer_map.get(gname)
-            if not cid:
-                warnings.append(
-                    f"Grant '{gname}' not found in QBO customers — line skipped."
-                )
-                continue
-            customer_ref = {"value": cid}
+            continue
 
-        class_id = class_map.get(cls)
-        detail: dict = {"AccountRef": {"value": account_id}}
-        if class_id:
-            detail["ClassRef"] = {"value": class_id}
-        else:
-            warnings.append(f"Class '{cls}' not found in QBO — line posted without class.")
-        if customer_ref:
-            detail["CustomerRef"] = customer_ref
-        detail["BillableStatus"] = "NotBillable"
+        emp_name = emp.get("full_name", f"{emp['first']} {emp['last']}")
+        period_str = period.get("period", "")
+        payday = period.get("payday", "")
+        emp_warnings: list[str] = []
+        lines = []
+        line_id = 1
 
-        lines.append({
-            "Id": str(i),
-            "DetailType": "AccountBasedExpenseLineDetail",
-            "Amount": amt,
-            "Description": row["description"],
-            "AccountBasedExpenseLineDetail": detail,
+        # ── Positive allocation lines ────────────────────────────────────────
+        for row in _get_expense_lines_for_emp(emp):
+            gname = row["grant"]
+            cls   = row["cls"]
+            amt   = row["amount"]
+
+            if gname == "PENDING":
+                if not include_pending:
+                    emp_warnings.append(f"{emp_name} / {cls}: PENDING — skipped.")
+                    continue
+                customer_ref = None
+            else:
+                cid = customer_map.get(gname)
+                if not cid:
+                    emp_warnings.append(
+                        f"Grant '{gname}' not found in QBO customers — line skipped."
+                    )
+                    continue
+                customer_ref = {"value": cid}
+
+            class_id = class_map.get(cls)
+            detail: dict = {"AccountRef": {"value": expense_account_id}}
+            if class_id:
+                detail["ClassRef"] = {"value": class_id}
+            else:
+                emp_warnings.append(f"Class '{cls}' not in QBO — posted without class.")
+            if customer_ref:
+                detail["CustomerRef"] = customer_ref
+            detail["BillableStatus"] = "NotBillable"
+
+            lines.append({
+                "Id": str(line_id),
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Amount": amt,
+                "Description": f"{emp_name} / {cls} — Payroll {period_str}",
+                "AccountBasedExpenseLineDetail": detail,
+            })
+            line_id += 1
+
+        # ── Negative liability lines ─────────────────────────────────────────
+        employer_fica = round(emp.get("employer_taxes", 0.0), 2)
+        dental = emp.get("dental_vision_employer", 0.0)
+        total_health = round(emp.get("health_allowance", 0.0) + dental, 2)
+
+        if tax_liability_id and employer_fica > 0:
+            lines.append({
+                "Id": str(line_id),
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Amount": round(-employer_fica, 2),
+                "Description": f"Employer Payroll Taxes — {emp_name}",
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": tax_liability_id}
+                },
+            })
+            line_id += 1
+
+        if health_liability_id and total_health > 0:
+            lines.append({
+                "Id": str(line_id),
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Amount": round(-total_health, 2),
+                "Description": f"Health/Dental/Vision — {emp_name}",
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": health_liability_id}
+                },
+            })
+
+        if not lines:
+            all_warnings.extend(emp_warnings)
+            continue
+
+        raw_period = re.sub(r"[^A-Za-z0-9\-_]", "-", period_str)
+        key_short  = re.sub(r"[^A-Za-z0-9]", "", emp.get("matrix_key", ""))[:8]
+        doc_num    = f"PR-{key_short}-{raw_period}"[:20]
+
+        payload = {
+            "PaymentType": "Cash",
+            "AccountRef":  {"value": bank_account_id},
+            "EntityRef":   {"value": vendor_id, "type": "Vendor"},
+            "TxnDate":     payday,
+            "DocNumber":   doc_num,
+            "PrivateNote": f"Payroll — {emp_name} — {period_str}",
+            "Line": lines,
+        }
+
+        exp_total = round(sum(l["Amount"] for l in lines), 2)
+        all_payloads.append({
+            "employee_name": emp_name,
+            "matrix_key":   emp["matrix_key"],
+            "payload":      payload,
+            "warnings":     emp_warnings,
+            "line_count":   len(lines),
+            "total":        exp_total,
         })
+        all_warnings.extend(emp_warnings)
 
-    # Sanitize DocNumber: keep only alphanumeric + dash/underscore, max 21 chars
-    raw_period = period.get("period", "")
-    doc_num = re.sub(r"[^A-Za-z0-9\-_]", "-", raw_period)[:21]
-
-    payload = {
-        "VendorRef":  {"value": vendor_id},
-        "TxnDate":    period.get("payday", ""),
-        "DueDate":    period.get("payday", ""),
-        "DocNumber":  f"PR-{doc_num}",
-        "PrivateNote": f"Payroll allocation – {raw_period}",
-        "Line": lines,
-    }
-    return payload, warnings
+    return all_payloads, all_warnings
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -739,20 +799,38 @@ async def post_payroll_to_qbo(
     file: UploadFile = File(...),
     realm_id: str = Query(..., description="QBO Company realm ID"),
     period_index: int = Query(..., description="0-based index of the pay period to post"),
-    expense_account: str = Query("Salaries & Wages", description="Name of the expense account in QBO"),
-    payroll_vendor: str = Query("Gusto", description="Vendor name in QBO for payroll"),
-    dry_run: bool = Query(True, description="true = preview only; false = create Bill in QBO"),
-    include_pending: bool = Query(False, description="Include PENDING lines (no grant) in the bill"),
+    expense_account: str = Query(
+        "Salaries & Wages",
+        description="Expense account name in QBO (e.g. '6110 Personnel Expenses:Salaries & W')",
+    ),
+    payroll_vendor: str = Query("Gusto", description="Vendor/payee name in QBO"),
+    bank_account: str = Query(
+        "Payroll",
+        description="Payment bank account name in QBO (e.g. '1112 Cash & Cash Equivalents:Payroll')",
+    ),
+    tax_liability_account: str = Query(
+        "Payroll Tax",
+        description="Payroll tax liability account (negative line). Leave blank to omit.",
+    ),
+    health_liability_account: str = Query(
+        "Payroll Health",
+        description="Health/dental liability account (negative line). Leave blank to omit.",
+    ),
+    dry_run: bool = Query(True, description="true = preview only; false = create Expenses in QBO"),
+    include_pending: bool = Query(False, description="Include PENDING lines (no grant) in the expense"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Post a payroll period's allocations to QBO as a **Bill**.
+    Post a payroll period's allocations to QBO as **Expenses** (Purchases).
 
-    Each bill line carries: Expense Account + Class + Customer (grant).
-    This allows QBO to filter spending by grant and by program class simultaneously.
+    Creates one Expense per employee, each paid from the payroll bank account.
+    Each allocation line carries: Expense Account + Class + Customer (grant).
+    Negative lines are added for employer FICA and health/dental liabilities.
+
+    Employee name is included in every line description and in PrivateNote.
 
     Use dry_run=true (default) first to verify QBO name matching,
-    then re-submit with dry_run=false to create the Bill.
+    then re-submit with dry_run=false to create the Expenses.
     """
     # ── 1. Parse + allocate ──────────────────────────────────────────────────
     if not file.filename or not file.filename.endswith(".xlsx"):
@@ -788,132 +866,186 @@ async def post_payroll_to_qbo(
         qbo_accounts  = await qbo.get_chart_of_accounts()
         qbo_classes   = await qbo.get_classes()
         qbo_customers = await qbo.get_customers()
+        qbo_banks     = await qbo.get_bank_accounts()
     except Exception as e:
         raise HTTPException(502, f"QBO API error fetching reference data: {e}")
 
-    # ── 4. Match names → QBO IDs ──────────────────────────────────────────────
-    # Vendor: try DisplayName first, then Name
-    vendor_match = (
-        _best_qbo_match(payroll_vendor, qbo_vendors, "DisplayName")
-        or _best_qbo_match(payroll_vendor, qbo_vendors, "CompanyName")
-    )
-    account_match = _best_qbo_match(expense_account, qbo_accounts, "Name")
+    # ── 4. Match names → QBO IDs (also check FullyQualifiedName for sub-customers) ──
+    def _match_vendor(name: str) -> dict | None:
+        return (
+            _best_qbo_match(name, qbo_vendors, "DisplayName")
+            or _best_qbo_match(name, qbo_vendors, "CompanyName")
+        )
+
+    def _match_account(name: str, pool: list[dict]) -> dict | None:
+        return (
+            _best_qbo_match(name, pool, "Name")
+            or _best_qbo_match(name, pool, "FullyQualifiedName")
+        )
+
+    def _match_customer(name: str) -> dict | None:
+        return (
+            _best_qbo_match(name, qbo_customers, "DisplayName")
+            or _best_qbo_match(name, qbo_customers, "FullyQualifiedName")
+            or _best_qbo_match(name, qbo_customers, "CompanyName")
+        )
+
+    vendor_match   = _match_vendor(payroll_vendor)
+    account_match  = _match_account(expense_account, qbo_accounts)
+    bank_match     = _match_account(bank_account, qbo_banks) or _match_account(bank_account, qbo_accounts)
+    tax_match      = _match_account(tax_liability_account, qbo_accounts) if tax_liability_account.strip() else None
+    health_match   = _match_account(health_liability_account, qbo_accounts) if health_liability_account.strip() else None
 
     # Collect all classes + grants used in this period
-    bill_rows = _get_bill_lines(period)
-    all_classes = {row["cls"]   for row in bill_rows}
-    all_grants  = {row["grant"] for row in bill_rows if row["grant"] != "PENDING"}
+    all_classes: set[str] = set()
+    all_grants: set[str] = set()
+    for emp in period["employees"]:
+        for row in _get_expense_lines_for_emp(emp):
+            all_classes.add(row["cls"])
+            if row["grant"] != "PENDING":
+                all_grants.add(row["grant"])
 
     class_map: dict[str, str] = {}
     customer_map: dict[str, str] = {}
+
+    for cls in sorted(all_classes):
+        m = _best_qbo_match(cls, qbo_classes, "Name") or _best_qbo_match(cls, qbo_classes, "FullyQualifiedName")
+        class_map[cls] = m["Id"] if m else ""
+
+    for g in sorted(all_grants):
+        m = _match_customer(g)
+        customer_map[g] = m["Id"] if m else ""
+
     lookups: dict = {
         "vendor": {
-            "searched": payroll_vendor,
-            "found": vendor_match is not None,
+            "searched": payroll_vendor, "found": vendor_match is not None,
             "qbo_name": vendor_match.get("DisplayName") if vendor_match else None,
             "qbo_id":   vendor_match.get("Id")          if vendor_match else None,
         },
+        "bank_account": {
+            "searched": bank_account, "found": bank_match is not None,
+            "qbo_name": bank_match.get("Name") if bank_match else None,
+            "qbo_id":   bank_match.get("Id")   if bank_match else None,
+        },
         "expense_account": {
-            "searched": expense_account,
-            "found": account_match is not None,
+            "searched": expense_account, "found": account_match is not None,
             "qbo_name": account_match.get("Name") if account_match else None,
             "qbo_id":   account_match.get("Id")   if account_match else None,
         },
-        "classes":   {},
-        "customers": {},
+        "tax_liability": {
+            "searched": tax_liability_account, "found": tax_match is not None,
+            "qbo_name": tax_match.get("Name") if tax_match else None,
+            "qbo_id":   tax_match.get("Id")   if tax_match else None,
+        },
+        "health_liability": {
+            "searched": health_liability_account, "found": health_match is not None,
+            "qbo_name": health_match.get("Name") if health_match else None,
+            "qbo_id":   health_match.get("Id")   if health_match else None,
+        },
+        "classes": {
+            cls: {
+                "found": bool(class_map.get(cls)),
+                "qbo_id": class_map.get(cls) or None,
+            }
+            for cls in sorted(all_classes)
+        },
+        "customers": {
+            g: {
+                "found": bool(customer_map.get(g)),
+                "qbo_id": customer_map.get(g) or None,
+                "qbo_name": (_match_customer(g) or {}).get("DisplayName"),
+            }
+            for g in sorted(all_grants)
+        },
     }
 
-    for cls in sorted(all_classes):
-        m = _best_qbo_match(cls, qbo_classes, "Name")
-        class_map[cls] = m["Id"] if m else ""
-        lookups["classes"][cls] = {
-            "found":    m is not None,
-            "qbo_name": m.get("Name") if m else None,
-            "qbo_id":   m.get("Id")   if m else None,
-        }
-
-    for g in sorted(all_grants):
-        m = (
-            _best_qbo_match(g, qbo_customers, "DisplayName")
-            or _best_qbo_match(g, qbo_customers, "CompanyName")
-        )
-        customer_map[g] = m["Id"] if m else ""
-        lookups["customers"][g] = {
-            "found":    m is not None,
-            "qbo_name": m.get("DisplayName") if m else None,
-            "qbo_id":   m.get("Id")          if m else None,
-        }
-
-    # ── 5. Build preview payload ──────────────────────────────────────────────
-    warnings: list[str] = []
+    # ── 5. Build per-employee expense payloads ────────────────────────────────
+    global_warnings: list[str] = []
     if not vendor_match:
-        warnings.append(
-            f"Vendor '{payroll_vendor}' not found in QBO. "
-            "Create a vendor named 'Gusto' (or similar) in QBO first."
-        )
+        global_warnings.append(f"Vendor '{payroll_vendor}' not found in QBO.")
+    if not bank_match:
+        global_warnings.append(f"Bank account '{bank_account}' not found in QBO.")
     if not account_match:
-        warnings.append(
-            f"Account '{expense_account}' not found in QBO. "
-            "Check the exact name in your chart of accounts."
-        )
+        global_warnings.append(f"Expense account '{expense_account}' not found in QBO.")
 
-    payload, bill_warnings = _build_qbo_bill_payload(
+    emp_payloads, payload_warnings = _build_qbo_expense_payloads(
         period,
+        bank_account_id=bank_match["Id"] if bank_match else "MISSING",
         vendor_id=vendor_match["Id"] if vendor_match else "MISSING",
-        account_id=account_match["Id"] if account_match else "MISSING",
+        expense_account_id=account_match["Id"] if account_match else "MISSING",
         class_map=class_map,
         customer_map=customer_map,
+        tax_liability_id=tax_match["Id"] if tax_match else None,
+        health_liability_id=health_match["Id"] if health_match else None,
         include_pending=include_pending,
     )
-    warnings.extend(bill_warnings)
-
-    bill_total = round(sum(line["Amount"] for line in payload["Line"]), 2)
-    ready = vendor_match is not None and account_match is not None
+    all_warnings = global_warnings + payload_warnings
+    ready = vendor_match is not None and bank_match is not None and account_match is not None
 
     if dry_run:
         return {
-            "dry_run":           True,
-            "period":            period["period"],
-            "payday":            period["payday"],
-            "period_total_cost": period["period_total_cost"],
-            "qbo_lookups":       lookups,
-            "bill_preview":      payload,
-            "line_count":        len(payload["Line"]),
-            "bill_total":        bill_total,
-            "warnings":          warnings,
-            "ready_to_post":     ready and len(payload["Line"]) > 0,
+            "dry_run":            True,
+            "period":             period["period"],
+            "payday":             period["payday"],
+            "period_total_cost":  period["period_total_cost"],
+            "employee_count":     len(emp_payloads),
+            "qbo_lookups":        lookups,
+            "expenses_preview":   [
+                {
+                    "employee_name": ep["employee_name"],
+                    "line_count":    ep["line_count"],
+                    "total":         ep["total"],
+                    "doc_number":    ep["payload"].get("DocNumber"),
+                    "lines":         ep["payload"]["Line"][:3],   # first 3 lines for preview
+                    "total_lines":   ep["line_count"],
+                    "warnings":      ep["warnings"],
+                }
+                for ep in emp_payloads
+            ],
+            "total_lines":  sum(ep["line_count"] for ep in emp_payloads),
+            "grand_total":  round(sum(ep["total"] for ep in emp_payloads), 2),
+            "warnings":     all_warnings,
+            "ready_to_post": ready and len(emp_payloads) > 0,
         }
 
-    # ── 6. Post Bill to QBO ───────────────────────────────────────────────────
+    # ── 6. Post one Expense per employee ─────────────────────────────────────
     if not ready:
         raise HTTPException(
             422,
-            "Cannot post: vendor or expense account not found in QBO. "
+            "Cannot post: vendor, bank account, or expense account not found in QBO. "
             "Run dry_run=true to see which lookups are missing.",
         )
-    if not payload["Line"]:
-        raise HTTPException(
-            422, "No postable lines after matching. Check warnings."
-        )
+    if not emp_payloads:
+        raise HTTPException(422, "No employees with postable lines. Check warnings.")
 
-    try:
-        result = await qbo.create_bill(payload)
-    except Exception as e:
-        raise HTTPException(502, f"QBO rejected the bill: {e}")
+    created: list[dict] = []
+    errors: list[str] = []
 
-    bill = result.get("Bill", {})
-    bill_id = bill.get("Id")
+    for ep in emp_payloads:
+        try:
+            result = await qbo.create_purchase(ep["payload"])
+            txn = result.get("Purchase", {})
+            txn_id = txn.get("Id")
+            created.append({
+                "employee_name": ep["employee_name"],
+                "expense_id":    txn_id,
+                "doc_number":    txn.get("DocNumber"),
+                "total":         txn.get("TotalAmt"),
+                "line_count":    ep["line_count"],
+                "qbo_link":      f"https://app.qbo.intuit.com/app/expense?txnId={txn_id}",
+                "warnings":      ep["warnings"],
+            })
+        except Exception as e:
+            errors.append(f"{ep['employee_name']}: {e}")
 
     return {
-        "dry_run":      False,
-        "period":       period["period"],
-        "payday":       period["payday"],
-        "bill_id":      bill_id,
-        "doc_number":   bill.get("DocNumber"),
-        "bill_total":   bill.get("TotalAmt"),
-        "line_count":   len(payload["Line"]),
-        "qbo_link":     f"https://app.qbo.intuit.com/app/bill?txnId={bill_id}",
-        "qbo_lookups":  lookups,
-        "warnings":     warnings,
+        "dry_run":       False,
+        "period":        period["period"],
+        "payday":        period["payday"],
+        "expenses_created": created,
+        "errors":        errors,
+        "total_posted":  round(sum(c["total"] or 0 for c in created), 2),
+        "qbo_lookups":   lookups,
+        "warnings":      all_warnings,
         "budget_status": budget_status,
     }

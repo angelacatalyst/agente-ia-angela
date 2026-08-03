@@ -210,7 +210,14 @@ export const api = {
       file: File,
       realmId: string,
       periodIndex: number,
-      opts?: { expenseAccount?: string; payrollVendor?: string; includePending?: boolean },
+      opts?: {
+        expenseAccount?: string
+        payrollVendor?: string
+        bankAccount?: string
+        taxLiabilityAccount?: string
+        healthLiabilityAccount?: string
+        includePending?: boolean
+      },
     ) => {
       const fd = new FormData()
       fd.append('file', file)
@@ -220,9 +227,12 @@ export const api = {
           realm_id: realmId,
           period_index: periodIndex,
           dry_run: true,
-          expense_account: opts?.expenseAccount ?? 'Salaries & Wages',
-          payroll_vendor: opts?.payrollVendor ?? 'Gusto',
-          include_pending: opts?.includePending ?? false,
+          expense_account:          opts?.expenseAccount ?? 'Salaries & Wages',
+          payroll_vendor:           opts?.payrollVendor ?? 'Gusto',
+          bank_account:             opts?.bankAccount ?? 'Payroll',
+          tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
+          health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
+          include_pending:          opts?.includePending ?? false,
         },
       }).then(r => r.data)
     },
@@ -230,7 +240,14 @@ export const api = {
       file: File,
       realmId: string,
       periodIndex: number,
-      opts?: { expenseAccount?: string; payrollVendor?: string; includePending?: boolean },
+      opts?: {
+        expenseAccount?: string
+        payrollVendor?: string
+        bankAccount?: string
+        taxLiabilityAccount?: string
+        healthLiabilityAccount?: string
+        includePending?: boolean
+      },
     ) => {
       const fd = new FormData()
       fd.append('file', file)
@@ -240,9 +257,12 @@ export const api = {
           realm_id: realmId,
           period_index: periodIndex,
           dry_run: false,
-          expense_account: opts?.expenseAccount ?? 'Salaries & Wages',
-          payroll_vendor: opts?.payrollVendor ?? 'Gusto',
-          include_pending: opts?.includePending ?? false,
+          expense_account:          opts?.expenseAccount ?? 'Salaries & Wages',
+          payroll_vendor:           opts?.payrollVendor ?? 'Gusto',
+          bank_account:             opts?.bankAccount ?? 'Payroll',
+          tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
+          health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
+          include_pending:          opts?.includePending ?? false,
         },
       }).then(r => r.data)
     },
@@ -463,38 +483,54 @@ export interface PayrollQBOBillLine {
   }
 }
 
+export interface PayrollQBOExpensePreview {
+  employee_name: string
+  line_count: number
+  total: number
+  doc_number: string
+  lines: PayrollQBOBillLine[]
+  total_lines: number
+  warnings: string[]
+}
+
 export interface PayrollQBOPreviewResponse {
   dry_run: true
   period: string
   payday: string
   period_total_cost: number
+  employee_count: number
   qbo_lookups: {
     vendor: PayrollQBOLookup
+    bank_account: PayrollQBOLookup
     expense_account: PayrollQBOLookup
-    classes: Record<string, PayrollQBOLookup>
-    customers: Record<string, PayrollQBOLookup>
+    tax_liability: PayrollQBOLookup
+    health_liability: PayrollQBOLookup
+    classes: Record<string, { found: boolean; qbo_id: string | null }>
+    customers: Record<string, { found: boolean; qbo_id: string | null; qbo_name: string | null }>
   }
-  bill_preview: {
-    VendorRef: { value: string }
-    TxnDate: string
-    DocNumber: string
-    PrivateNote: string
-    Line: PayrollQBOBillLine[]
-  }
-  line_count: number
-  bill_total: number
+  expenses_preview: PayrollQBOExpensePreview[]
+  total_lines: number
+  grand_total: number
   warnings: string[]
   ready_to_post: boolean
+}
+
+export interface PayrollQBOCreatedExpense {
+  employee_name: string
+  expense_id: string
+  doc_number: string
+  total: number
+  line_count: number
+  qbo_link: string
+  warnings: string[]
 }
 
 export interface PayrollQBOPostResult {
   dry_run: false
   period: string
   payday: string
-  bill_id: string
-  doc_number: string
-  bill_total: number
-  line_count: number
-  qbo_link: string
+  expenses_created: PayrollQBOCreatedExpense[]
+  errors: string[]
+  total_posted: number
   warnings: string[]
 }

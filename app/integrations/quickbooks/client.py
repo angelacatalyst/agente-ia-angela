@@ -193,6 +193,17 @@ class QBOClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def create_purchase(self, payload: dict) -> dict:
+        """Create a QBO Purchase (Expense) transaction — paid from a bank account."""
+        await self._ensure_token()
+        url = f"{self._base}/purchase"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url, headers=self._headers(), params=self._params(), json=payload
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     # ── Chart of Accounts ─────────────────────────────────────────────────────
 
     async def get_chart_of_accounts(self) -> list[dict]:
