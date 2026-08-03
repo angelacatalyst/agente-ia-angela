@@ -331,16 +331,20 @@ export function PayrollPage() {
                           </div>
 
                           {/* Cost components */}
-                          <div className="grid grid-cols-4 border-b border-surface-100 text-[11px]">
+                          <div className="grid grid-cols-5 border-b border-surface-100 text-[11px]">
                             {[
-                              ['Gross', emp.gross],
+                              ['Gross Salary', emp.gross],
                               ['Employer FICA', emp.employer_taxes],
-                              ['Health', emp.health_allowance],
+                              ['Health Allow.', emp.health_allowance],
                               ['Dental/Vision', emp.dental_vision_employer ?? 0],
-                            ].map(([label, val]) => (
-                              <div key={label as string} className="px-4 py-2 border-r border-surface-100 last:border-r-0">
+                              ['Total Cost', emp.total_cost ?? 0],
+                            ].map(([label, val], idx) => (
+                              <div key={label as string} className={cn(
+                                'px-4 py-2 border-r border-surface-100 last:border-r-0',
+                                idx === 4 && 'bg-surface-50 font-bold',
+                              )}>
                                 <p className="text-surface-400">{label}</p>
-                                <p className="font-semibold text-surface-700">{fmt(val as number)}</p>
+                                <p className={cn('font-semibold text-surface-700', idx === 4 && 'text-surface-900')}>{fmt(val as number)}</p>
                               </div>
                             ))}
                           </div>
@@ -362,8 +366,9 @@ export function PayrollPage() {
                                 <th className="px-4 py-2 text-left font-medium">Class</th>
                                 <th className="px-3 py-2 text-right font-medium">%</th>
                                 <th className="px-3 py-2 text-right font-medium">Salary</th>
-                                <th className="px-3 py-2 text-right font-medium">Taxes</th>
-                                <th className="px-3 py-2 text-right font-medium">Benefits</th>
+                                <th className="px-3 py-2 text-right font-medium">FICA</th>
+                                <th className="px-3 py-2 text-right font-medium">Health</th>
+                                <th className="px-3 py-2 text-right font-medium">Dental/Vis.</th>
                                 <th className="px-3 py-2 text-right font-medium">Total</th>
                                 <th className="px-3 py-2 text-left font-medium">Grant</th>
                               </tr>
@@ -375,7 +380,8 @@ export function PayrollPage() {
                                   <td className="px-3 py-1.5 text-right text-surface-500">{(data.pct * 100).toFixed(0)}%</td>
                                   <td className="px-3 py-1.5 text-right text-surface-600">{fmt(data.salary_portion)}</td>
                                   <td className="px-3 py-1.5 text-right text-surface-600">{fmt(data.taxes_portion)}</td>
-                                  <td className="px-3 py-1.5 text-right text-surface-600">{fmt(data.benefits_portion)}</td>
+                                  <td className="px-3 py-1.5 text-right text-surface-600">{fmt(data.health_portion ?? 0)}</td>
+                                  <td className="px-3 py-1.5 text-right text-surface-600">{fmt(data.dental_portion ?? 0)}</td>
                                   <td className="px-3 py-1.5 text-right font-semibold text-surface-900">{fmt(data.amount)}</td>
                                   <td className="px-3 py-1.5">
                                     <span className={cn('inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold', grantStyle(data.grant))}>

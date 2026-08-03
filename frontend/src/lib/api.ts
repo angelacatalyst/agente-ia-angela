@@ -359,8 +359,10 @@ export interface PayrollClassAllocation {
   amount: number
   salary_portion: number
   taxes_portion: number
-  benefits_portion: number
-  grant: string   // which grant covers this class (waterfall label)
+  health_portion: number
+  dental_portion: number
+  benefits_portion: number   // health + dental combined (kept for compatibility)
+  grant: string              // which grant covers this class (waterfall label)
 }
 
 export interface PayrollEmployee {

@@ -389,6 +389,8 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
                     "amount":          round(amt, 2),
                     "salary_portion":  round(emp["gross"] * pct, 2),
                     "taxes_portion":   round(emp["employer_taxes"] * pct, 2),
+                    "health_portion":  round(emp["health_allowance"] * pct, 2),
+                    "dental_portion":  round(dental * pct, 2),
                     "benefits_portion": round((emp["health_allowance"] + dental) * pct, 2),
                     "grant":           class_grant_coverage.get(cls, "—"),
                 }
