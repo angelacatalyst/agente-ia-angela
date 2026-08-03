@@ -100,6 +100,8 @@ ALLOCATION_MATRIX: dict[str, dict] = {
         "title": "Director of Impact",
         "gusto_last": "Arguelles",
         "gusto_first": "Meysa",
+        # ── EMPLOYEE allocation (Jan–Jun, appears in Gusto at $3,333.33/period) ──
+        # 6 classes, covered by CITI until exhausted → PENDING
         "classes": {
             "Operations":   0.10,
             "Fundraising":  0.10,
@@ -108,9 +110,6 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Negocios":     0.20,
             "Bus C":        0.25,
         },
-        # Employee Jan–Jun: CITI covers all classes until its budget is exhausted.
-        # Contractor Jul 15–Dec: $4,100/mo (6 months = $24,600) covered by TRUIST.
-        # Both phases use the same class % allocation; TRUIST picks up after CITI.
         "grant_rules": [
             {
                 "pool_classes": [
@@ -118,13 +117,31 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "La Oficina", "Negocios", "Bus C",
                 ],
                 "waterfall": [
-                    {"name": "CITI",   "annual_budget": 33377.05},
-                    {"name": "TRUIST", "annual_budget": 24600.00},  # contractor $4,100 × 6 mo
+                    {"name": "CITI", "annual_budget": 33377.05},
                 ],
             },
         ],
-        "note": "Empleada Jan–Jun (CITI). Contratista Jul 15–Dic a $4,100/mes (TRUIST).",
         "dental_vision_employer": 24.37,
+        # ── CONTRACTOR allocation (Jul 15–Dec, NOT in Gusto — fixed $4,100/mo) ──
+        # Different classes and different % from the employee allocation
+        "contractor": {
+            "monthly_amount": 4100.00,
+            "start_date": "2026-07-15",
+            "classes": {
+                "SBRC":     0.40,
+                "Negocios": 0.20,
+                "Bus C":    0.40,
+            },
+            "grant_rules": [
+                {
+                    "pool_classes": ["SBRC", "Negocios", "Bus C"],
+                    "waterfall": [
+                        {"name": "TRUIST", "annual_budget": 24600.00},  # $4,100 × 6 mo
+                    ],
+                },
+            ],
+        },
+        "note": "Empleada Jan–Jun: CITI (6 clases). Contratista Jul 15–Dic: TRUIST $4,100/mes (SBRC 40%, Negocios 20%, Bus C 40%). El contrato NO aparece en Gusto.",
     },
 
     "Drelly": {
@@ -485,6 +502,7 @@ async def get_matrix() -> dict:
                 "title":       v["title"],
                 "classes":     v["classes"],
                 "grant_rules": v["grant_rules"],
+                "contractor":  v.get("contractor"),   # None for most employees
                 "note":        v.get("note"),
             }
             for k, v in ALLOCATION_MATRIX.items()

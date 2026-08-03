@@ -508,7 +508,9 @@ export function PayrollPage() {
                 <div className="flex divide-x divide-surface-100">
                   {/* Classes */}
                   <div className="flex-1 p-4">
-                    <p className="text-[11px] font-semibold uppercase tracking-wider text-surface-400 mb-2">Classes</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-surface-400 mb-2">
+                      Classes — Empleado/a
+                    </p>
                     <div className="space-y-1.5">
                       {Object.entries(emp.classes).map(([cls, pct]) => (
                         <div key={cls} className="flex items-center justify-between">
@@ -524,12 +526,37 @@ export function PayrollPage() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Contractor classes (Meysa) */}
+                    {(emp as any).contractor && (
+                      <div className="mt-3 pt-3 border-t border-surface-100">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-500 mb-2">
+                          Classes — Contratista ({(emp as any).contractor.start_date} · ${(emp as any).contractor.monthly_amount.toLocaleString()}/mes)
+                        </p>
+                        <div className="space-y-1.5">
+                          {Object.entries((emp as any).contractor.classes).map(([cls, pct]) => (
+                            <div key={cls} className="flex items-center justify-between">
+                              <span className="text-xs text-surface-700">{cls}</span>
+                              <div className="flex items-center gap-2">
+                                <div className="h-1.5 w-20 rounded-full bg-amber-100">
+                                  <div className="h-1.5 rounded-full bg-amber-400" style={{ width: `${(pct as number) * 100}%` }} />
+                                </div>
+                                <span className="text-[11px] font-semibold text-amber-700 w-8 text-right">
+                                  {((pct as number) * 100).toFixed(0)}%
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Grant rules */}
                   <div className="flex-1 p-4">
                     <p className="text-[11px] font-semibold uppercase tracking-wider text-surface-400 mb-2">Grant Waterfall</p>
                     <div className="space-y-2">
+                      {/* Employee grant rules */}
                       {(emp as any).grant_rules?.map((pool: any, pi: number) => (
                         <div key={pi} className="rounded-lg border border-surface-100 p-2.5">
                           <p className="text-[10px] text-surface-400 mb-1.5">
@@ -552,6 +579,27 @@ export function PayrollPage() {
                               </span>
                               <span className="text-[10px] text-surface-400 ml-auto">if all exhausted</span>
                             </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Contractor grant rules (Meysa) */}
+                      {(emp as any).contractor?.grant_rules?.map((pool: any, pi: number) => (
+                        <div key={`c-${pi}`} className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+                          <p className="text-[10px] text-amber-600 font-semibold mb-1">CONTRATISTA</p>
+                          <p className="text-[10px] text-surface-400 mb-1.5">
+                            Covers: <span className="font-medium text-surface-600">{pool.pool_classes.join(', ')}</span>
+                          </p>
+                          <div className="space-y-1">
+                            {pool.waterfall.map((g: any, gi: number) => (
+                              <div key={g.name} className="flex items-center gap-2">
+                                <span className="text-[10px] text-amber-400 w-3">{gi + 1}.</span>
+                                <span className={cn('text-[11px] font-semibold rounded-full border px-2 py-0.5', grantStyle(g.name))}>
+                                  {g.name}
+                                </span>
+                                <span className="text-[10px] text-surface-500 ml-auto">{fmt(g.annual_budget)}/yr</span>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       ))}
