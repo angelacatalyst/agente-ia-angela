@@ -5,6 +5,7 @@ import type {
   PayrollPeriod, PayrollMatrixResponse,
   PayrollJournalEntry, PayrollBudgetInfo,
   PayrollQBOPreviewResponse, PayrollQBOPostResult,
+  PayrollQBOLookup,
   QBOCompany,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
