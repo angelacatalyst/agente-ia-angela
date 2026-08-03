@@ -34,6 +34,8 @@ function SecretInput({ label, placeholder, hint }: { label: string; placeholder:
   )
 }
 
+const QBO_AUTHORIZE_URL = '/api/v1/integrations/qbo/authorize?user_id=user'
+
 function CompanyCard({ company, isSelected, onSelect }: {
   company: QBOCompany
   isSelected: boolean
@@ -41,30 +43,38 @@ function CompanyCard({ company, isSelected, onSelect }: {
 }) {
   const expired = company.token_expired
   return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-all',
-        isSelected
-          ? 'border-primary-300 bg-primary-50 ring-1 ring-primary-200'
-          : 'border-surface-200 bg-white hover:border-surface-300 hover:bg-surface-50',
-      )}
-    >
-      <div className={cn(
-        'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
-        expired ? 'bg-amber-50' : 'bg-emerald-50',
-      )}>
-        <Building2 size={16} className={expired ? 'text-amber-500' : 'text-emerald-600'} />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-surface-900 truncate">{company.company_name}</p>
-        <p className="text-[11px] text-surface-400 truncate">Realm: {company.realm_id}</p>
-      </div>
-      <div className="flex flex-col items-end gap-1 shrink-0">
+    <div className={cn(
+      'w-full flex items-center gap-3 p-3 rounded-xl border transition-all',
+      isSelected
+        ? 'border-primary-300 bg-primary-50 ring-1 ring-primary-200'
+        : 'border-surface-200 bg-white',
+      expired ? 'border-amber-200' : '',
+    )}>
+      <button onClick={onSelect} className="flex items-center gap-3 flex-1 min-w-0 text-left">
+        <div className={cn(
+          'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
+          expired ? 'bg-amber-50' : 'bg-emerald-50',
+        )}>
+          <Building2 size={16} className={expired ? 'text-amber-500' : 'text-emerald-600'} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-surface-900 truncate">{company.company_name}</p>
+          <p className="text-[11px] text-surface-400 truncate">Realm: {company.realm_id}</p>
+        </div>
+      </button>
+      <div className="flex flex-col items-end gap-1.5 shrink-0">
         {expired ? (
-          <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full ring-1 ring-amber-200">
-            <AlertCircle size={9} /> Token expired
-          </span>
+          <>
+            <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full ring-1 ring-amber-200">
+              <AlertCircle size={9} /> Token expired
+            </span>
+            <a
+              href={QBO_AUTHORIZE_URL}
+              className="flex items-center gap-1 text-[10px] font-bold text-white bg-primary-600 hover:bg-primary-700 px-2.5 py-1 rounded-full transition-colors"
+            >
+              <RefreshCw size={9} /> Reconnect
+            </a>
+          </>
         ) : (
           <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200">
             <CheckCircle2 size={9} /> Connected
@@ -74,7 +84,7 @@ function CompanyCard({ company, isSelected, onSelect }: {
           <span className="text-[10px] font-bold text-primary-600">Active</span>
         )}
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -182,9 +192,9 @@ export function SettingsPage() {
                   Link your QBO account to enable live auditing, transaction coding, and financial reporting.
                 </p>
               </div>
-              <button className="btn-primary inline-flex">
+              <a href={QBO_AUTHORIZE_URL} className="btn-primary inline-flex">
                 <ExternalLink size={14} /> {t('common.connect')} QuickBooks
-              </button>
+              </a>
             </div>
           )}
         </div>
