@@ -560,6 +560,18 @@ async def process_payroll(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Class name aliases — short codes used in the matrix → full QBO class names
+# ─────────────────────────────────────────────────────────────────────────────
+
+CLASS_NAME_ALIASES: dict[str, str] = {
+    "CPA":  "Community Planning Academy",
+    "ILB":  "Impact Leadership Bootcamp",
+}
+
+# QBO customer name for lines that have no grant assigned yet
+PENDING_GRANT_NAME = "Pending Allocations Grant"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # QBO Bill helpers — fuzzy name matching + bill line builder
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -698,10 +710,15 @@ def _build_qbo_expense_payloads(
             amt   = row["amount"]
 
             if gname == "PENDING":
-                if not include_pending:
-                    emp_warnings.append(f"{emp_name} / {cls}: PENDING — skipped.")
-                    continue
-                customer_ref = None
+                # Map PENDING lines to the "Pending Allocations Grant" QBO customer
+                pending_cid = customer_map.get("PENDING")
+                if pending_cid:
+                    customer_ref = {"value": pending_cid}
+                else:
+                    emp_warnings.append(
+                        f"{emp_name} / {cls}: PENDING — 'Pending Allocations Grant' not found in QBO, posted without customer."
+                    )
+                    customer_ref = None
             else:
                 cid = customer_map.get(gname)
                 if not cid:
@@ -923,22 +940,36 @@ async def post_payroll_to_qbo(
     # Collect all classes + grants used in this period
     all_classes: set[str] = set()
     all_grants: set[str] = set()
+    has_pending = False
     for emp in period["employees"]:
         for row in _get_expense_lines_for_emp(emp):
             all_classes.add(row["cls"])
-            if row["grant"] != "PENDING":
+            if row["grant"] == "PENDING":
+                has_pending = True
+            else:
                 all_grants.add(row["grant"])
 
     class_map: dict[str, str] = {}
     customer_map: dict[str, str] = {}
 
     for cls in sorted(all_classes):
-        m = _best_qbo_match(cls, qbo_classes, "Name") or _best_qbo_match(cls, qbo_classes, "FullyQualifiedName")
+        # Expand short codes (CPA, ILB) to full QBO class names
+        qbo_cls_name = CLASS_NAME_ALIASES.get(cls, cls)
+        m = (
+            _best_qbo_match(qbo_cls_name, qbo_classes, "Name")
+            or _best_qbo_match(qbo_cls_name, qbo_classes, "FullyQualifiedName")
+            or _best_qbo_match(cls, qbo_classes, "Name")  # fallback to short name
+        )
         class_map[cls] = m["Id"] if m else ""
 
     for g in sorted(all_grants):
         m = _match_customer(g)
         customer_map[g] = m["Id"] if m else ""
+
+    # Always resolve the "Pending Allocations Grant" customer if any PENDING lines exist
+    if has_pending:
+        m = _match_customer(PENDING_GRANT_NAME)
+        customer_map["PENDING"] = m["Id"] if m else ""
 
     lookups: dict = {
         "vendor": {
@@ -974,12 +1005,24 @@ async def post_payroll_to_qbo(
             for cls in sorted(all_classes)
         },
         "customers": {
-            g: {
-                "found": bool(customer_map.get(g)),
-                "qbo_id": customer_map.get(g) or None,
-                "qbo_name": (_match_customer(g) or {}).get("DisplayName"),
-            }
-            for g in sorted(all_grants)
+            **{
+                g: {
+                    "found": bool(customer_map.get(g)),
+                    "qbo_id": customer_map.get(g) or None,
+                    "qbo_name": (_match_customer(g) or {}).get("DisplayName"),
+                }
+                for g in sorted(all_grants)
+            },
+            **(
+                {
+                    "PENDING": {
+                        "found": bool(customer_map.get("PENDING")),
+                        "qbo_id": customer_map.get("PENDING") or None,
+                        "qbo_name": PENDING_GRANT_NAME,
+                    }
+                }
+                if has_pending else {}
+            ),
         },
     }
 
