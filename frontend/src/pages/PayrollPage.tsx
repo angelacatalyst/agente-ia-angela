@@ -70,6 +70,10 @@ export function PayrollPage() {
   const [qboBankAccount, setQboBankAccount] = useState('Payroll')
   const [qboTaxAccount, setQboTaxAccount] = useState('Payroll Tax')
   const [qboHealthAccount, setQboHealthAccount] = useState('Payroll Health')
+  const [qboTaxExpenseAccount, setQboTaxExpenseAccount] = useState('Payroll Taxes')
+  const [qboHealthExpenseAccount, setQboHealthExpenseAccount] = useState('Health Benefits')
+  const [qboDentalExpenseAccount, setQboDentalExpenseAccount] = useState('Vision and Dental')
+  const [qboDentalVendor, setQboDentalVendor] = useState('The Guardian')
   const [qboPreview, setQboPreview] = useState<PayrollQBOPreviewResponse | null>(null)
   const [qboPreviewLoading, setQboPreviewLoading] = useState(false)
   const [qboPosting, setQboPosting] = useState(false)
@@ -96,6 +100,10 @@ export function PayrollPage() {
     bankAccount: qboBankAccount,
     taxLiabilityAccount: qboTaxAccount,
     healthLiabilityAccount: qboHealthAccount,
+    taxExpenseAccount: qboTaxExpenseAccount,
+    healthExpenseAccount: qboHealthExpenseAccount,
+    dentalExpenseAccount: qboDentalExpenseAccount,
+    dentalVendor: qboDentalVendor,
   })
 
   const runQboPreview = async () => {
@@ -930,11 +938,15 @@ export function PayrollPage() {
                     <p className="text-[11px] font-semibold text-surface-500 uppercase tracking-wider">QBO Account Names</p>
                     <div className="grid grid-cols-2 gap-2.5">
                       {[
-                        { label: 'Vendor (Payee)', val: qboVendor,        set: setQboVendor,        ph: 'Gusto' },
-                        { label: 'Bank Account',   val: qboBankAccount,   set: setQboBankAccount,   ph: '1112 Cash:Payroll' },
-                        { label: 'Expense Account',val: qboAccount,       set: setQboAccount,       ph: '6110 Personnel:Salaries' },
-                        { label: 'Tax Liability',  val: qboTaxAccount,    set: setQboTaxAccount,    ph: '2131 Payroll Tax' },
-                        { label: 'Health Liability',val: qboHealthAccount,set: setQboHealthAccount, ph: '2136 Health Benefits' },
+                        { label: 'Vendor (Payee)',    val: qboVendor,              set: setQboVendor,              ph: 'Gusto' },
+                        { label: 'Bank Account',      val: qboBankAccount,         set: setQboBankAccount,         ph: '1112 Cash:Payroll' },
+                        { label: 'Expense Account',   val: qboAccount,             set: setQboAccount,             ph: '6110 Personnel:Salaries' },
+                        { label: 'Tax Liability',     val: qboTaxAccount,          set: setQboTaxAccount,          ph: '2131 Payroll Tax' },
+                        { label: 'Health Liability',  val: qboHealthAccount,       set: setQboHealthAccount,       ph: '2136 Health Benefits' },
+                        { label: 'Tax Expense Acct',  val: qboTaxExpenseAccount,   set: setQboTaxExpenseAccount,   ph: '6130 Payroll Taxes' },
+                        { label: 'Health Expense Acct',val: qboHealthExpenseAccount,set: setQboHealthExpenseAccount,ph: '6155 Health Benefits' },
+                        { label: 'Dental Expense Acct',val: qboDentalExpenseAccount,set: setQboDentalExpenseAccount,ph: '6152 Vision and Dental' },
+                        { label: 'Dental Vendor',     val: qboDentalVendor,        set: setQboDentalVendor,        ph: 'The Guardian' },
                       ].map(({ label, val, set, ph }) => (
                         <div key={label} className="space-y-1">
                           <label className="text-[10px] font-semibold text-surface-500">{label}</label>
@@ -989,6 +1001,10 @@ export function PayrollPage() {
                             ['Expense Account', qboPreview.qbo_lookups.expense_account],
                             ['Tax Liability', qboPreview.qbo_lookups.tax_liability],
                             ['Health Liability', qboPreview.qbo_lookups.health_liability],
+                            ['Tax Expense Acct', qboPreview.qbo_lookups.tax_expense],
+                            ['Health Expense Acct', qboPreview.qbo_lookups.health_expense],
+                            ['Dental Expense Acct', qboPreview.qbo_lookups.dental_expense],
+                            ['Dental Vendor', qboPreview.qbo_lookups.dental_vendor],
                           ] as [string, PayrollQBOLookup][]).map(([label, info]) => (
                             <div key={label} className="flex items-center justify-between px-3 py-1.5">
                               <span className="text-[11px] text-surface-500">{label}: <span className="font-medium text-surface-700">"{info.searched}"</span></span>

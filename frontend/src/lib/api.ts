@@ -217,6 +217,10 @@ export const api = {
         taxLiabilityAccount?: string
         healthLiabilityAccount?: string
         includePending?: boolean
+        taxExpenseAccount?: string
+        healthExpenseAccount?: string
+        dentalExpenseAccount?: string
+        dentalVendor?: string
       },
     ) => {
       const fd = new FormData()
@@ -233,6 +237,10 @@ export const api = {
           tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
           health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
           include_pending:          opts?.includePending ?? false,
+          tax_expense_account:      opts?.taxExpenseAccount ?? 'Payroll Taxes',
+          health_expense_account:   opts?.healthExpenseAccount ?? 'Health Benefits',
+          dental_expense_account:   opts?.dentalExpenseAccount ?? 'Vision and Dental',
+          dental_vendor:            opts?.dentalVendor ?? 'The Guardian',
         },
       }).then(r => r.data)
     },
@@ -247,6 +255,10 @@ export const api = {
         taxLiabilityAccount?: string
         healthLiabilityAccount?: string
         includePending?: boolean
+        taxExpenseAccount?: string
+        healthExpenseAccount?: string
+        dentalExpenseAccount?: string
+        dentalVendor?: string
       },
     ) => {
       const fd = new FormData()
@@ -263,6 +275,10 @@ export const api = {
           tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
           health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
           include_pending:          opts?.includePending ?? false,
+          tax_expense_account:      opts?.taxExpenseAccount ?? 'Payroll Taxes',
+          health_expense_account:   opts?.healthExpenseAccount ?? 'Health Benefits',
+          dental_expense_account:   opts?.dentalExpenseAccount ?? 'Vision and Dental',
+          dental_vendor:            opts?.dentalVendor ?? 'The Guardian',
         },
       }).then(r => r.data)
     },
@@ -505,6 +521,10 @@ export interface PayrollQBOPreviewResponse {
     expense_account: PayrollQBOLookup
     tax_liability: PayrollQBOLookup
     health_liability: PayrollQBOLookup
+    tax_expense: PayrollQBOLookup
+    health_expense: PayrollQBOLookup
+    dental_expense: PayrollQBOLookup
+    dental_vendor: PayrollQBOLookup
     classes: Record<string, { found: boolean; qbo_id: string | null }>
     customers: Record<string, { found: boolean; qbo_id: string | null; qbo_name: string | null }>
   }

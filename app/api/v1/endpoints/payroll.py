@@ -255,6 +255,19 @@ def _parse_gusto(data: bytes) -> list[dict]:
 
     periods: list[dict] = []
     current: dict | None = None
+    header_map: dict[str, int] = {}
+
+    def _hget(col_name: str, fallback_idx: int, *aliases: str) -> float:
+        for name in (col_name, *aliases):
+            if name in header_map:
+                try:
+                    return float(row[header_map[name]] or 0)
+                except (TypeError, ValueError):
+                    pass
+        try:
+            return float(row[fallback_idx] or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     for row in rows:
         r0 = str(row[0]).strip() if row[0] else ""
@@ -262,25 +275,27 @@ def _parse_gusto(data: bytes) -> list[dict]:
 
         if r0 == "Payroll period":
             current = {"period": r1.strip(), "payday": None, "employees": []}
+            header_map = {}
         elif r0 == "Pay day" and current is not None:
             current["payday"] = r1.strip()
+        elif r0 == "Last Name" and current is not None:
+            header_map = {str(c).strip(): i for i, c in enumerate(row) if c is not None}
         elif current is not None and r0 not in (
             "", "Payroll period", "Pay day", "Last Name",
             "Payroll Totals", "Employee Earnings",
         ):
-            try:
-                gross = float(row[7] or 0)
-            except (TypeError, ValueError):
-                continue
+            gross = _hget("Gross Earnings", 7)
             if not r0 or gross == 0:
                 continue
             current["employees"].append({
                 "last":   r0,
                 "first":  str(row[1] or "").strip(),
                 "dept":   str(row[2] or "").strip(),
-                "gross":          gross,
-                "employer_taxes": float(row[14] or 0),
-                "health_allowance": float(row[17] or 0),
+                "gross":             gross,
+                "employee_taxes":    _hget("Employee Taxes", 9),
+                "employer_taxes":    _hget("Employer Taxes", 14),
+                "employee_dental":   _hget("Insurance Vision and Dental (Employee Post-Tax Deduction)", 8, "Vision and Dental"),
+                "health_allowance":  _hget("None", 17, "Health Allowance", "Medical"),
             })
         elif r0 == "Payroll Totals" and current is not None:
             periods.append(current)
@@ -655,6 +670,65 @@ def _get_expense_lines_for_emp(emp: dict) -> list[dict]:
     return rows
 
 
+def _get_allocation_ratios(emp: dict) -> list[dict]:
+    """Return [{cls, grant, ratio}] where ratio is fraction of total allocation."""
+    raw = _get_expense_lines_for_emp(emp)
+    total = sum(r["amount"] for r in raw)
+    if not total:
+        return []
+    return [{"cls": r["cls"], "grant": r["grant"], "ratio": r["amount"] / total} for r in raw]
+
+
+def _make_allocation_lines(
+    ratios: list[dict],
+    base_amount: float,
+    account_id: str,
+    class_map: dict[str, str],
+    customer_map: dict[str, str],
+    description: str,
+    start_id: int = 1,
+) -> tuple[list[dict], list[str], int]:
+    """Build QBO expense lines from allocation ratios × base_amount."""
+    lines: list[dict] = []
+    warnings: list[str] = []
+    line_id = start_id
+    for r in ratios:
+        cls = r["cls"]
+        gname = r["grant"]
+        amt = round(r["ratio"] * base_amount, 2)
+        if amt == 0:
+            continue
+        if gname == "PENDING":
+            cid = customer_map.get("PENDING")
+            customer_ref = {"value": cid} if cid else None
+            if not cid:
+                warnings.append(f"PENDING — 'Pending Allocations Grant' not found in QBO, posted without customer.")
+        else:
+            cid = customer_map.get(gname)
+            if not cid:
+                warnings.append(f"Grant '{gname}' not found in QBO — line skipped.")
+                continue
+            customer_ref = {"value": cid}
+        class_id = class_map.get(cls)
+        detail: dict = {"AccountRef": {"value": account_id}}
+        if class_id:
+            detail["ClassRef"] = {"value": class_id}
+        else:
+            warnings.append(f"Class '{cls}' not in QBO — posted without class.")
+        if customer_ref:
+            detail["CustomerRef"] = customer_ref
+        detail["BillableStatus"] = "NotBillable"
+        lines.append({
+            "Id": str(line_id),
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "Amount": amt,
+            "Description": description,
+            "AccountBasedExpenseLineDetail": detail,
+        })
+        line_id += 1
+    return lines, warnings, line_id
+
+
 def _get_bill_lines(period: dict) -> list[dict]:
     """Kept for compatibility — flat list across all employees."""
     rows: list[dict] = []
@@ -669,21 +743,22 @@ def _build_qbo_expense_payloads(
     period: dict,
     bank_account_id: str,
     vendor_id: str,
+    dental_vendor_id: str | None,
     expense_account_id: str,
-    class_map: dict[str, str],          # our class name → QBO class Id
-    customer_map: dict[str, str],        # grant name → QBO customer Id
-    tax_liability_id: str | None,        # QBO account for employer FICA
-    health_liability_id: str | None,     # QBO account for health + dental
-    include_pending: bool = False,
+    tax_expense_account_id: str,
+    health_expense_account_id: str,
+    dental_expense_account_id: str,
+    class_map: dict[str, str],
+    customer_map: dict[str, str],
+    tax_liability_id: str | None,
+    health_liability_id: str | None,
 ) -> tuple[list[dict], list[str]]:
     """
-    Build one QBO Purchase (Expense) payload per employee.
-    Each expense has:
-      + Positive lines:  one per (class, grant) allocation
-      - Negative lines:  employer FICA and health/dental liabilities
-    Returns (list_of_employee_payloads, all_warnings).
-    Each item in the list is:
-      { employee_name, matrix_key, payload, warnings, line_count, total }
+    Build 4 QBO Purchase (Expense) payloads per employee:
+      A) Salary (6110)  — gross by class/grant, minus employee taxes & dental liabilities
+      B) Taxes  (6130)  — employer taxes by class/grant, plus clearing employee tax liability
+      C) Health (6155)  — health allowance by class/grant
+      D) Dental (6152)  — dental employer by class/grant, minus dental liability (nets $0)
     """
     all_payloads: list[dict] = []
     all_warnings: list[str] = []
@@ -696,113 +771,142 @@ def _build_qbo_expense_payloads(
                 )
             continue
 
-        emp_name = emp.get("full_name", f"{emp['first']} {emp['last']}")
+        emp_name  = emp.get("full_name", f"{emp['first']} {emp['last']}")
         period_str = period.get("period", "")
-        payday = period.get("payday", "")
-        emp_warnings: list[str] = []
-        lines = []
-        line_id = 1
-
-        # ── Positive allocation lines ────────────────────────────────────────
-        for row in _get_expense_lines_for_emp(emp):
-            gname = row["grant"]
-            cls   = row["cls"]
-            amt   = row["amount"]
-
-            if gname == "PENDING":
-                # Map PENDING lines to the "Pending Allocations Grant" QBO customer
-                pending_cid = customer_map.get("PENDING")
-                if pending_cid:
-                    customer_ref = {"value": pending_cid}
-                else:
-                    emp_warnings.append(
-                        f"{emp_name} / {cls}: PENDING — 'Pending Allocations Grant' not found in QBO, posted without customer."
-                    )
-                    customer_ref = None
-            else:
-                cid = customer_map.get(gname)
-                if not cid:
-                    emp_warnings.append(
-                        f"Grant '{gname}' not found in QBO customers — line skipped."
-                    )
-                    continue
-                customer_ref = {"value": cid}
-
-            class_id = class_map.get(cls)
-            detail: dict = {"AccountRef": {"value": expense_account_id}}
-            if class_id:
-                detail["ClassRef"] = {"value": class_id}
-            else:
-                emp_warnings.append(f"Class '{cls}' not in QBO — posted without class.")
-            if customer_ref:
-                detail["CustomerRef"] = customer_ref
-            detail["BillableStatus"] = "NotBillable"
-
-            lines.append({
-                "Id": str(line_id),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "Amount": amt,
-                "Description": f"{emp_name} / {cls} — Payroll {period_str}",
-                "AccountBasedExpenseLineDetail": detail,
-            })
-            line_id += 1
-
-        # ── Negative liability lines ─────────────────────────────────────────
-        employer_fica = round(emp.get("employer_taxes", 0.0), 2)
-        dental = emp.get("dental_vision_employer", 0.0)
-        total_health = round(emp.get("health_allowance", 0.0) + dental, 2)
-
-        if tax_liability_id and employer_fica > 0:
-            lines.append({
-                "Id": str(line_id),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "Amount": round(-employer_fica, 2),
-                "Description": f"Employer Payroll Taxes — {emp_name}",
-                "AccountBasedExpenseLineDetail": {
-                    "AccountRef": {"value": tax_liability_id}
-                },
-            })
-            line_id += 1
-
-        if health_liability_id and total_health > 0:
-            lines.append({
-                "Id": str(line_id),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "Amount": round(-total_health, 2),
-                "Description": f"Health/Dental/Vision — {emp_name}",
-                "AccountBasedExpenseLineDetail": {
-                    "AccountRef": {"value": health_liability_id}
-                },
-            })
-
-        if not lines:
-            all_warnings.extend(emp_warnings)
+        payday    = period.get("payday", "")
+        ratios    = _get_allocation_ratios(emp)
+        if not ratios:
+            all_warnings.append(f"{emp_name}: no allocation ratios — skipped.")
             continue
 
+        gross           = round(emp.get("gross", 0.0), 2)
+        employee_taxes  = round(emp.get("employee_taxes", 0.0), 2)
+        employer_taxes  = round(emp.get("employer_taxes", 0.0), 2)
+        employee_dental = round(emp.get("employee_dental", 0.0), 2)
+        health          = round(emp.get("health_allowance", 0.0), 2)
+        dental_employer = round(emp.get("dental_vision_employer", 0.0), 2)
+
         raw_period = re.sub(r"[^A-Za-z0-9\-_]", "-", period_str)
-        key_short  = re.sub(r"[^A-Za-z0-9]", "", emp.get("matrix_key", ""))[:8]
-        doc_num    = f"PR-{key_short}-{raw_period}"[:20]
+        key_short  = re.sub(r"[^A-Za-z0-9]", "", emp.get("matrix_key", ""))[:6]
+        doc_base   = f"PR-{key_short}-{raw_period}"[:18]
 
-        payload = {
-            "PaymentType": "Cash",
-            "AccountRef":  {"value": bank_account_id},
-            "EntityRef":   {"value": vendor_id, "type": "Vendor"},
-            "TxnDate":     payday,
-            "DocNumber":   doc_num,
-            "PrivateNote": f"Payroll — {emp_name} — {period_str}",
-            "Line": lines,
-        }
+        def _make_payload(
+            doc_suffix: str,
+            private_note: str,
+            lines: list[dict],
+            use_vendor_id: str,
+        ) -> dict:
+            return {
+                "PaymentType": "Cash",
+                "AccountRef":  {"value": bank_account_id},
+                "EntityRef":   {"value": use_vendor_id, "type": "Vendor"},
+                "TxnDate":     payday,
+                "DocNumber":   f"{doc_base}-{doc_suffix}",
+                "PrivateNote": private_note,
+                "Line": lines,
+            }
 
-        exp_total = round(sum(l["Amount"] for l in lines), 2)
-        all_payloads.append({
-            "employee_name": emp_name,
-            "matrix_key":   emp["matrix_key"],
-            "payload":      payload,
-            "warnings":     emp_warnings,
-            "line_count":   len(lines),
-            "total":        exp_total,
-        })
-        all_warnings.extend(emp_warnings)
+        # ── A: SALARY ────────────────────────────────────────────────────────
+        if gross > 0:
+            sal_lines, sal_warns, next_id = _make_allocation_lines(
+                ratios, gross, expense_account_id, class_map, customer_map,
+                f"{emp_name} / Payroll {period_str}", start_id=1,
+            )
+            # Negative: employee taxes withheld → tax liability
+            if tax_liability_id and employee_taxes > 0:
+                sal_lines.append({
+                    "Id": str(next_id),
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "Amount": round(-employee_taxes, 2),
+                    "Description": f"Employee Taxes Withheld — {emp_name}",
+                    "AccountBasedExpenseLineDetail": {"AccountRef": {"value": tax_liability_id}},
+                })
+                next_id += 1
+            # Negative: employee dental deduction → health/dental liability
+            if health_liability_id and employee_dental > 0:
+                sal_lines.append({
+                    "Id": str(next_id),
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "Amount": round(-employee_dental, 2),
+                    "Description": f"Employee Dental Deduction — {emp_name}",
+                    "AccountBasedExpenseLineDetail": {"AccountRef": {"value": health_liability_id}},
+                })
+            if sal_lines:
+                payload = _make_payload("S", f"Salary — {emp_name} — {period_str}", sal_lines, vendor_id)
+                all_payloads.append({
+                    "employee_name": emp_name, "expense_type": "salary",
+                    "matrix_key": emp["matrix_key"], "payload": payload,
+                    "warnings": sal_warns, "line_count": len(sal_lines),
+                    "total": round(sum(l["Amount"] for l in sal_lines), 2),
+                })
+                all_warnings.extend(sal_warns)
+
+        # ── B: PAYROLL TAXES ─────────────────────────────────────────────────
+        if employer_taxes > 0:
+            tax_lines, tax_warns, next_id = _make_allocation_lines(
+                ratios, employer_taxes, tax_expense_account_id, class_map, customer_map,
+                f"{emp_name} / Payroll Taxes {period_str}", start_id=1,
+            )
+            # Positive: clear employee tax liability
+            if tax_liability_id and employee_taxes > 0:
+                tax_lines.append({
+                    "Id": str(next_id),
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "Amount": round(employee_taxes, 2),
+                    "Description": f"Employee Taxes Payable — {emp_name}",
+                    "AccountBasedExpenseLineDetail": {"AccountRef": {"value": tax_liability_id}},
+                })
+            if tax_lines:
+                payload = _make_payload("T", f"Payroll Taxes — {emp_name} — {period_str}", tax_lines, vendor_id)
+                all_payloads.append({
+                    "employee_name": emp_name, "expense_type": "taxes",
+                    "matrix_key": emp["matrix_key"], "payload": payload,
+                    "warnings": tax_warns, "line_count": len(tax_lines),
+                    "total": round(sum(l["Amount"] for l in tax_lines), 2),
+                })
+                all_warnings.extend(tax_warns)
+
+        # ── C: HEALTH INSURANCE ──────────────────────────────────────────────
+        if health > 0:
+            hlt_lines, hlt_warns, _ = _make_allocation_lines(
+                ratios, health, health_expense_account_id, class_map, customer_map,
+                f"{emp_name} / Health Insurance {period_str}", start_id=1,
+            )
+            if hlt_lines:
+                payload = _make_payload("H", f"Health Insurance — {emp_name} — {period_str}", hlt_lines, vendor_id)
+                all_payloads.append({
+                    "employee_name": emp_name, "expense_type": "health",
+                    "matrix_key": emp["matrix_key"], "payload": payload,
+                    "warnings": hlt_warns, "line_count": len(hlt_lines),
+                    "total": round(sum(l["Amount"] for l in hlt_lines), 2),
+                })
+                all_warnings.extend(hlt_warns)
+
+        # ── D: DENTAL / VISION ───────────────────────────────────────────────
+        if dental_employer > 0:
+            dnt_lines, dnt_warns, next_id = _make_allocation_lines(
+                ratios, dental_employer, dental_expense_account_id, class_map, customer_map,
+                f"{emp_name} / Health Insurance Vision & Dental {period_str}", start_id=1,
+            )
+            # Negative: employer dental → health/dental liability (nets to $0)
+            if health_liability_id and dental_employer > 0:
+                dnt_lines.append({
+                    "Id": str(next_id),
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "Amount": round(-dental_employer, 2),
+                    "Description": f"Dental/Vision Liability — {emp_name}",
+                    "AccountBasedExpenseLineDetail": {"AccountRef": {"value": health_liability_id}},
+                })
+            dnt_vendor = dental_vendor_id or vendor_id
+            if dnt_lines:
+                payload = _make_payload("D", f"Dental & Vision — {emp_name} — {period_str}", dnt_lines, dnt_vendor)
+                all_payloads.append({
+                    "employee_name": emp_name, "expense_type": "dental",
+                    "matrix_key": emp["matrix_key"], "payload": payload,
+                    "warnings": dnt_warns, "line_count": len(dnt_lines),
+                    "total": round(sum(l["Amount"] for l in dnt_lines), 2),
+                })
+                all_warnings.extend(dnt_warns)
 
     return all_payloads, all_warnings
 
@@ -847,8 +951,23 @@ async def post_payroll_to_qbo(
         "Payroll Health",
         description="Health/dental liability account (negative line). Leave blank to omit.",
     ),
+    tax_expense_account: str = Query(
+        "Payroll Taxes",
+        description="Expense account for employer taxes (e.g. '6130 Personnel Expenses:Payroll Taxes')",
+    ),
+    health_expense_account: str = Query(
+        "Health Benefits",
+        description="Expense account for health insurance (e.g. '6155')",
+    ),
+    dental_expense_account: str = Query(
+        "Vision and Dental",
+        description="Expense account for dental/vision (e.g. '6152')",
+    ),
+    dental_vendor: str = Query(
+        "The Guardian",
+        description="Vendor name for dental/vision expenses in QBO",
+    ),
     dry_run: bool = Query(True, description="true = preview only; false = create Expenses in QBO"),
-    include_pending: bool = Query(False, description="Include PENDING lines (no grant) in the expense"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
@@ -936,6 +1055,10 @@ async def post_payroll_to_qbo(
     bank_match     = _match_account(bank_account, qbo_banks) or _match_account(bank_account, qbo_accounts)
     tax_match      = _match_account(tax_liability_account, qbo_accounts) if tax_liability_account.strip() else None
     health_match   = _match_account(health_liability_account, qbo_accounts) if health_liability_account.strip() else None
+    tax_exp_match    = _match_account(tax_expense_account, qbo_accounts)
+    health_exp_match = _match_account(health_expense_account, qbo_accounts)
+    dental_exp_match = _match_account(dental_expense_account, qbo_accounts)
+    dental_vendor_match = _match_vendor(dental_vendor) if dental_vendor.strip() else None
 
     # Collect all classes + grants used in this period
     all_classes: set[str] = set()
@@ -997,6 +1120,26 @@ async def post_payroll_to_qbo(
             "qbo_name": health_match.get("Name") if health_match else None,
             "qbo_id":   health_match.get("Id")   if health_match else None,
         },
+        "tax_expense": {
+            "searched": tax_expense_account, "found": tax_exp_match is not None,
+            "qbo_name": tax_exp_match.get("Name") if tax_exp_match else None,
+            "qbo_id":   tax_exp_match.get("Id")   if tax_exp_match else None,
+        },
+        "health_expense": {
+            "searched": health_expense_account, "found": health_exp_match is not None,
+            "qbo_name": health_exp_match.get("Name") if health_exp_match else None,
+            "qbo_id":   health_exp_match.get("Id")   if health_exp_match else None,
+        },
+        "dental_expense": {
+            "searched": dental_expense_account, "found": dental_exp_match is not None,
+            "qbo_name": dental_exp_match.get("Name") if dental_exp_match else None,
+            "qbo_id":   dental_exp_match.get("Id")   if dental_exp_match else None,
+        },
+        "dental_vendor": {
+            "searched": dental_vendor, "found": dental_vendor_match is not None,
+            "qbo_name": dental_vendor_match.get("DisplayName") if dental_vendor_match else None,
+            "qbo_id":   dental_vendor_match.get("Id")          if dental_vendor_match else None,
+        },
         "classes": {
             cls: {
                 "found": bool(class_map.get(cls)),
@@ -1039,12 +1182,15 @@ async def post_payroll_to_qbo(
         period,
         bank_account_id=bank_match["Id"] if bank_match else "MISSING",
         vendor_id=vendor_match["Id"] if vendor_match else "MISSING",
+        dental_vendor_id=dental_vendor_match["Id"] if dental_vendor_match else None,
         expense_account_id=account_match["Id"] if account_match else "MISSING",
+        tax_expense_account_id=tax_exp_match["Id"] if tax_exp_match else "MISSING",
+        health_expense_account_id=health_exp_match["Id"] if health_exp_match else "MISSING",
+        dental_expense_account_id=dental_exp_match["Id"] if dental_exp_match else "MISSING",
         class_map=class_map,
         customer_map=customer_map,
         tax_liability_id=tax_match["Id"] if tax_match else None,
         health_liability_id=health_match["Id"] if health_match else None,
-        include_pending=include_pending,
     )
     all_warnings = global_warnings + payload_warnings
     ready = vendor_match is not None and bank_match is not None and account_match is not None
