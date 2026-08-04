@@ -277,7 +277,21 @@ def _parse_gusto(data: bytes) -> list[dict]:
             current = {"period": r1.strip(), "payday": None, "employees": []}
             header_map = {}
         elif r0 == "Pay day" and current is not None:
-            current["payday"] = r1.strip()
+            # openpyxl may return a date/datetime object or a string
+            from datetime import datetime as _dt, date as _date
+            raw = row[1]
+            if isinstance(raw, (_dt, _date)):
+                current["payday"] = raw.strftime("%Y-%m-%d")
+            else:
+                raw_str = str(raw).strip() if raw else ""
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        current["payday"] = _dt.strptime(raw_str, fmt).strftime("%Y-%m-%d")
+                        break
+                    except ValueError:
+                        pass
+                else:
+                    current["payday"] = raw_str
         elif r0 == "Last Name" and current is not None:
             header_map = {str(c).strip(): i for i, c in enumerate(row) if c is not None}
         elif current is not None and r0 not in (
@@ -752,6 +766,7 @@ def _build_qbo_expense_payloads(
     customer_map: dict[str, str],
     tax_liability_id: str | None,
     health_liability_id: str | None,
+    department_map: dict[str, str] | None = None,  # employee full_name → QBO dept Id
 ) -> tuple[list[dict], list[str]]:
     """
     Build 4 QBO Purchase (Expense) payloads per employee:
@@ -790,13 +805,15 @@ def _build_qbo_expense_payloads(
         key_short  = re.sub(r"[^A-Za-z0-9]", "", emp.get("matrix_key", ""))[:6]
         doc_base   = f"PR-{key_short}-{raw_period}"[:18]
 
+        dept_id = (department_map or {}).get(emp_name) or (department_map or {}).get(emp.get("title", ""))
+
         def _make_payload(
             doc_suffix: str,
             private_note: str,
             lines: list[dict],
             use_vendor_id: str,
         ) -> dict:
-            return {
+            payload: dict = {
                 "PaymentType": "Cash",
                 "AccountRef":  {"value": bank_account_id},
                 "EntityRef":   {"value": use_vendor_id, "type": "Vendor"},
@@ -805,6 +822,9 @@ def _build_qbo_expense_payloads(
                 "PrivateNote": private_note,
                 "Line": lines,
             }
+            if dept_id:
+                payload["DepartmentRef"] = {"value": dept_id}
+            return payload
 
         # ── A: SALARY ────────────────────────────────────────────────────────
         if gross > 0:
@@ -1020,6 +1040,7 @@ async def post_payroll_to_qbo(
         qbo_accounts  = await qbo.get_chart_of_accounts()
         qbo_classes   = await qbo.get_classes()
         qbo_customers = await qbo.get_customers()
+        qbo_departments = await qbo.get_departments()
     except Exception as e:
         _status = _extract_http_status(e)
         raise HTTPException(502, f"QBO error fetching reference data (HTTP {_status}): {type(e).__name__}")
@@ -1178,6 +1199,20 @@ async def post_payroll_to_qbo(
     if not account_match:
         global_warnings.append(f"Expense account '{expense_account}' not found in QBO.")
 
+    # Build department map: employee title → QBO Department Id
+    department_map: dict[str, str] = {}
+    for emp in period["employees"]:
+        key = emp.get("matrix_key")
+        if not key:
+            continue
+        title = ALLOCATION_MATRIX.get(key, {}).get("title", "")
+        full_name = ALLOCATION_MATRIX.get(key, {}).get("full_name", "")
+        if title:
+            dm = _best_qbo_match(title, qbo_departments, "Name") or _best_qbo_match(title, qbo_departments, "FullyQualifiedName")
+            if dm:
+                department_map[full_name] = dm["Id"]
+                department_map[title] = dm["Id"]
+
     emp_payloads, payload_warnings = _build_qbo_expense_payloads(
         period,
         bank_account_id=bank_match["Id"] if bank_match else "MISSING",
@@ -1191,6 +1226,7 @@ async def post_payroll_to_qbo(
         customer_map=customer_map,
         tax_liability_id=tax_match["Id"] if tax_match else None,
         health_liability_id=health_match["Id"] if health_match else None,
+        department_map=department_map,
     )
     all_warnings = global_warnings + payload_warnings
     ready = vendor_match is not None and bank_match is not None and account_match is not None
