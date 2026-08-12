@@ -191,6 +191,8 @@ export const api = {
       apiClient.get<QBOProjectsResponse>('/qbo/data/projects', { params: { realm_id: realmId } }).then(r => r.data),
     projectPL: (realmId: string, customerId: string, startDate?: string, endDate?: string) =>
       apiClient.get('/qbo/data/projects/pl', { params: { realm_id: realmId, customer_id: customerId, start_date: startDate, end_date: endDate } }).then(r => r.data),
+    bankAccounts: (realmId: string) =>
+      apiClient.get<{ accounts: QBOBankAccount[]; total: number; fetched_at: string }>('/qbo/data/bank-accounts', { params: { realm_id: realmId } }).then(r => r.data),
   },
 
   payroll: {
@@ -368,6 +370,17 @@ export interface QBOProject {
   customer_name: string
   description: string
   source: 'project' | 'customer'
+}
+
+export interface QBOBankAccount {
+  id: string
+  name: string
+  full_name: string
+  account_type: string
+  account_sub_type: string
+  balance: number
+  balance_fmt: string
+  currency: string
 }
 
 export interface QBODonor {

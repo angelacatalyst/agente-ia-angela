@@ -1,13 +1,14 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useI18n } from '@/lib/i18n'
 import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
+import type { QBOBankAccount } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   Landmark, Loader2, CheckCircle2, AlertCircle, RefreshCw,
-  Download, Search, AlertTriangle, DollarSign,
+  Download, Search, AlertTriangle, DollarSign, ChevronDown,
 } from 'lucide-react'
 
 const QUICK_PROMPTS = [
@@ -31,6 +32,19 @@ export function BankRecPage() {
   )
   const [accountName, setAccountName] = useState('')
   const [result, setResult] = useState<string | null>(null)
+
+  // Bank accounts dropdown
+  const [bankAccounts, setBankAccounts] = useState<QBOBankAccount[]>([])
+  const [loadingAccounts, setLoadingAccounts] = useState(false)
+
+  useEffect(() => {
+    if (!selectedRealmId) return
+    setLoadingAccounts(true)
+    api.qboData.bankAccounts(selectedRealmId)
+      .then(d => setBankAccounts(d.accounts))
+      .catch(() => setBankAccounts([]))
+      .finally(() => setLoadingAccounts(false))
+  }, [selectedRealmId])
 
   const mutation = useMutation({
     mutationFn: () => {
@@ -111,13 +125,38 @@ export function BankRecPage() {
                 </p>
 
                 <div>
-                  <label className="block text-xs font-medium text-surface-600 mb-1.5">Account Name</label>
-                  <input
-                    className="input"
-                    placeholder="e.g. Checking, Savings, Chase Bank"
-                    value={accountName}
-                    onChange={e => setAccountName(e.target.value)}
-                  />
+                  <label className="block text-xs font-medium text-surface-600 mb-1.5">
+                    Account Name
+                    {loadingAccounts && <Loader2 size={10} className="inline ml-1.5 animate-spin text-surface-400" />}
+                  </label>
+                  {bankAccounts.length > 0 ? (
+                    <div className="relative">
+                      <select
+                        className="input appearance-none pr-8"
+                        value={accountName}
+                        onChange={e => setAccountName(e.target.value)}
+                      >
+                        <option value="">— Select bank account —</option>
+                        {bankAccounts.map(acct => (
+                          <option key={acct.id} value={acct.full_name}>
+                            {acct.full_name}
+                            {acct.account_type === 'Credit Card' ? ' (CC)' : ''}
+                            {' · '}
+                            {acct.balance_fmt}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={13} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-surface-400" />
+                    </div>
+                  ) : (
+                    <input
+                      className="input"
+                      placeholder={loadingAccounts ? 'Loading accounts…' : 'e.g. Checking, Savings, Chase Bank'}
+                      value={accountName}
+                      onChange={e => setAccountName(e.target.value)}
+                      disabled={loadingAccounts}
+                    />
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">

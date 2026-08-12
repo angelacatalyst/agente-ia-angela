@@ -487,3 +487,41 @@ def _extract_aging_total(report: dict) -> float | None:
         return None
     except Exception:
         return None
+
+
+# ── Bank Accounts (Conc. Bancos page) ────────────────────────────────────────
+
+@router.get("/bank-accounts")
+async def get_bank_accounts(
+    realm_id: str = Query(..., description="QBO realm/company ID"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return all active bank and credit card accounts with their current balance."""
+    client = await _get_client(realm_id, db)
+    try:
+        accounts = await client.get_chart_of_accounts()
+    except Exception as e:
+        raise HTTPException(502, f"Error fetching accounts from QBO: {e}")
+
+    bank_accounts = [
+        {
+            "id":           a.get("Id", ""),
+            "name":         a.get("Name", ""),
+            "full_name":    a.get("FullyQualifiedName", a.get("Name", "")),
+            "account_type": a.get("AccountType", ""),
+            "account_sub_type": a.get("AccountSubType", ""),
+            "balance":      a.get("CurrentBalance", 0.0),
+            "balance_fmt":  f"${a.get('CurrentBalance', 0.0):,.2f}",
+            "currency":     a.get("CurrencyRef", {}).get("value", "USD"),
+        }
+        for a in accounts
+        if a.get("AccountType") in ("Bank", "Credit Card") and a.get("Active", True)
+    ]
+
+    bank_accounts.sort(key=lambda x: x["full_name"])
+
+    return {
+        "accounts": bank_accounts,
+        "total": len(bank_accounts),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
