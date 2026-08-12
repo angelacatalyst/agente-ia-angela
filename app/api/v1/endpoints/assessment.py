@@ -289,6 +289,7 @@ async def run_assessment(
         ar_aging_report,
         ap_aging_report,
         undeposited_funds,
+        items_list,
     ) = await asyncio.gather(
         safe_fetch(client.get_profit_loss(period_from, period_to), "profit_loss", {}),
         safe_fetch(client.get_balance_sheet(period_to), "balance_sheet", {}),
@@ -296,6 +297,7 @@ async def run_assessment(
         safe_fetch(client.get_ar_aging(), "ar_aging", {}),
         safe_fetch(client.get_ap_aging(), "ap_aging", {}),
         safe_fetch(client.get_undeposited_funds(), "undeposited_funds", []),
+        safe_fetch(client._query("SELECT * FROM Item MAXRESULTS 500"), "items", []),
     )
 
     # ── Pre-process data ───────────────────────────────────────────────────────
@@ -343,20 +345,72 @@ async def run_assessment(
     ws_bank = wb["Banking "]
     banking_issues: list[str] = []
 
+    # Build a lookup: account Name → LastReconcileDate (from COA data)
+    acct_rec_dates: dict[str, str] = {}
+    for a in coa_list:
+        lrd = a.get("LastReconcileDate", "") or ""
+        if lrd:
+            acct_rec_dates[a.get("Name", "")] = lrd
+
+    unreconciled_accounts: list[str] = []
+    old_rec_accounts: list[str] = []
+
     for i, acct in enumerate(bank_accounts[:5], start=4):
-        ws_bank[f"A{i}"].value = acct.get("Name", "")
-        ws_bank[f"G{i}"].value = "Review needed"
-        ws_bank[f"J{i}"].value = "Review needed"
-        ws_bank[f"O{i}"].value = "Review needed"
-        ws_bank[f"R{i}"].value = "Yes" if acct.get("AccountSubType") != "CashOnHand" else "No"
-        ws_bank[f"W{i}"].value = "Review needed"
+        name = acct.get("Name", "")
+        ws_bank[f"A{i}"].value = name
+        last_rec = acct.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
+        if last_rec:
+            # Format YYYY-MM-DD → MM/DD/YYYY
+            try:
+                from datetime import date
+                d = date.fromisoformat(last_rec)
+                ws_bank[f"G{i}"].value = d.strftime("%m/%d/%Y")
+                # Flag if reconciled more than 45 days ago
+                days_since = (date.today() - d).days
+                if days_since > 45:
+                    old_rec_accounts.append(f"{name} (last: {d.strftime('%m/%d/%Y')})")
+            except Exception:
+                ws_bank[f"G{i}"].value = last_rec
+        else:
+            ws_bank[f"G{i}"].value = "Never reconciled"
+            unreconciled_accounts.append(name)
+
+        ws_bank[f"J{i}"].value = "Review in QBO Reconcile"
+        ws_bank[f"O{i}"].value = "Review in QBO Reconcile"
+        cc_types = ("CreditCard", "Credit Card")
+        is_cc = acct.get("AccountType") == "Credit Card" or acct.get("AccountSubType") in cc_types
+        ws_bank[f"R{i}"].value = "Review in QBO Banking"
+        ws_bank[f"W{i}"].value = "Review in QBO Banking"
 
     if bank_accounts:
+        acct_lines = []
+        for a in bank_accounts[:5]:
+            name = a.get("Name", "")
+            lrd = a.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
+            status = ""
+            if lrd:
+                try:
+                    from datetime import date
+                    d = date.fromisoformat(lrd)
+                    days = (date.today() - d).days
+                    status = f"reconciled through {d.strftime('%m/%d/%Y')} ({days} days ago)"
+                except Exception:
+                    status = f"last reconciled: {lrd}"
+            else:
+                status = "NEVER RECONCILED"
+            acct_lines.append(f"• {name}: {status}")
+
         banking_summary = (
-            f"Found {len(bank_accounts)} bank/credit card account(s): "
-            + ", ".join(a.get("Name", "") for a in bank_accounts[:5])
-            + ". Manual reconciliation review required for each account."
+            f"Found {len(bank_accounts)} bank/credit card account(s):\n"
+            + "\n".join(acct_lines)
         )
+        if unreconciled_accounts:
+            banking_issues.append(f"Account(s) never reconciled: {', '.join(unreconciled_accounts)}")
+            banking_summary += f"\n\nACTION REQUIRED: {', '.join(unreconciled_accounts)} — establish opening balance and reconcile."
+        if old_rec_accounts:
+            banking_issues.append(f"Account(s) overdue for reconciliation (>45 days): {', '.join(old_rec_accounts)}")
+            banking_summary += f"\n\nOVERDUE: {', '.join(old_rec_accounts)} — reconcile to current date."
+        banking_summary += "\n\nFor each account: review uncleared items, auto-adjustments, bank feed status, and old transactions in QBO Reconcile and Banking tabs."
     else:
         banking_summary = "No bank or credit card accounts found in Chart of Accounts."
         banking_issues.append("No bank accounts found in COA")
@@ -364,10 +418,26 @@ async def run_assessment(
     if undeposited_funds:
         udf_total = sum(_safe_float(f.get("Amount", 0)) for f in undeposited_funds)
         if udf_total > 0:
-            banking_issues.append(f"Undeposited Funds balance of ${udf_total:,.2f} needs review")
-            banking_summary += f" Undeposited Funds: ${udf_total:,.2f} — review and clear."
+            banking_issues.append(f"Undeposited Funds balance of ${udf_total:,.2f} — review and clear")
+            banking_summary += f"\n\nUndeposited Funds: ${udf_total:,.2f} outstanding — review and deposit or void stale items."
 
     ws_bank["A11"].value = banking_summary
+
+    # Work to be completed — Banking
+    banking_work_items = []
+    if unreconciled_accounts:
+        banking_work_items.append(f"Establish opening balance and perform initial reconciliation for: {', '.join(unreconciled_accounts)}")
+    if old_rec_accounts:
+        banking_work_items.append(f"Bring reconciliation current for: {', '.join(old_rec_accounts)}")
+    if bank_accounts:
+        banking_work_items.append("Review each account in QBO Reconcile > History for old uncleared items and auto-adjustments")
+        banking_work_items.append("Verify bank feed is connected and active for each account in QBO Banking > Banking tab")
+        banking_work_items.append("Clear any old unreviewed transactions in the For Review tab (older than 30 days)")
+    ws_bank["A16"].value = (
+        "\n".join(f"• {w}" for w in banking_work_items)
+        if banking_work_items else "No immediate banking work required based on available data."
+    )
+
     issues_found.extend(banking_issues)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -712,6 +782,33 @@ async def run_assessment(
             "Income, COGS, and expense accounts appear properly categorized."
         )
     ws_pl["A51"].value = pl_summary
+
+    # Work to be completed — P&L
+    pl_work = []
+    if any("Uncategorized" in i or "uncategorized" in i for i in pl_issues):
+        pl_work.append("Reclassify all Uncategorized Income and Uncategorized Expense transactions to proper accounts")
+    if any("Ask My Accountant" in i for i in pl_issues):
+        pl_work.append("Review and reclassify all Ask My Accountant transactions")
+    if any("Reconciliation Discrepancy" in i for i in pl_issues):
+        pl_work.append("Investigate and correct the Reconciliation Discrepancy balance")
+    if any("Negative income" in i or "negative income" in i for i in pl_issues):
+        pl_work.append("Investigate and correct negative income account balances")
+    if any("Negative expense" in i or "negative expense" in i for i in pl_issues):
+        pl_work.append("Review and correct negative expense account balances — likely reversed entries needed")
+    if any("Loan" in i or "loan" in i for i in pl_issues):
+        pl_work.append("Split loan payments: principal to liability account, interest to Interest Expense")
+    if any("personal" in i.lower() for i in pl_issues):
+        pl_work.append("Review personal expense transactions — reclassify to Owner Draw or document business purpose")
+    if any("COGS" in i for i in pl_issues):
+        pl_work.append("Review COGS classification and ensure all direct costs are correctly categorized")
+    if any("Sales tax" in i or "sales tax" in i for i in pl_issues):
+        pl_work.append("Move sales tax transactions out of expense accounts and use QBO Sales Tax Center")
+    if any("Unapplied" in i for i in pl_issues):
+        pl_work.append("Apply all outstanding payments to corresponding invoices or bills in QBO")
+    if not pl_work:
+        pl_work.append("Continue monitoring P&L monthly for new uncategorized or unusual balances")
+    ws_pl["A57"].value = "\n".join(f"• {w}" for w in pl_work)
+
     issues_found.extend(pl_issues)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -930,6 +1027,29 @@ async def run_assessment(
             "Assets, liabilities, and equity appear properly structured."
         )
     ws_bs["A40"].value = bs_summary
+
+    # Work to be completed — Balance Sheet
+    bs_work = []
+    if any("Opening Balance Equity" in i for i in bs_issues):
+        bs_work.append("Clear Opening Balance Equity: reclassify balance to Retained Earnings or appropriate equity account via journal entry")
+    if any("Uncategorized Asset" in i for i in bs_issues):
+        bs_work.append("Identify and reclassify all Uncategorized Asset transactions")
+    if any("Negative AR" in i for i in bs_issues):
+        bs_work.append("Investigate negative AR balance — apply credit memos or correct misposted payments")
+    if any("Negative AP" in i for i in bs_issues):
+        bs_work.append("Investigate negative AP balance — apply vendor credits or correct duplicate payments")
+    if any("depreciation" in i.lower() for i in bs_issues):
+        bs_work.append("Post depreciation journal entries for the period; verify prior year depreciation is on file")
+    if any("Fixed asset" in i for i in bs_issues):
+        bs_work.append("Review fixed asset accounts under $2,500 — expense items below client's capitalization threshold")
+    if any("credit card liability" in i.lower() for i in bs_issues):
+        bs_work.append("Investigate negative credit card liability balances — likely duplicate payments or recording errors")
+    if any("Notes Payable" in i for i in bs_issues):
+        bs_work.append("Record interest expense on outstanding notes payable; obtain current loan statement from client")
+    if not bs_work:
+        bs_work.append("Continue monitoring Balance Sheet monthly; ensure ending balances are reconciled to bank statements")
+    ws_bs["A47"].value = "\n".join(f"• {w}" for w in bs_work)
+
     issues_found.extend(bs_issues)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -989,6 +1109,19 @@ async def run_assessment(
         if ar_issues else
         f"AR review shows no major issues. Total outstanding: ${ar_bkts.get('total', 0):,.2f}."
     )
+
+    # Work to be completed — AR
+    ar_work = []
+    if ar_90 or ar_bkts.get("91+", 0) > 0.01:
+        ar_work.append(f"Follow up on AR items over 90 days (${ar_bkts.get('91+', 0):,.2f}) — contact customers or write off uncollectable amounts")
+    if ar_neg:
+        ar_work.append(f"Apply {len(ar_neg)} customer credit balance(s) to open invoices or issue refunds")
+    if ar_zero:
+        ar_work.append(f"Review and close {len(ar_zero)} customer(s) with $0 AR balance — void or write off stale open invoices")
+    if not ar_work:
+        ar_work.append("Continue monitoring AR aging monthly; follow up on any items approaching 60 days")
+    ws_arap["A21"].value = "\n".join(f"• {w}" for w in ar_work)
+
     issues_found.extend(ar_issues)
 
     # AP checks
@@ -1031,6 +1164,19 @@ async def run_assessment(
         if ap_issues else
         f"AP review shows no major issues. Total outstanding: ${ap_bkts.get('total', 0):,.2f}."
     )
+
+    # Work to be completed — AP
+    ap_work = []
+    if ap_90 or ap_bkts.get("91+", 0) > 0.01:
+        ap_work.append(f"Review AP items over 90 days (${ap_bkts.get('91+', 0):,.2f}) — pay outstanding bills or void if no longer owed")
+    if ap_neg:
+        ap_work.append(f"Apply {len(ap_neg)} vendor debit balance(s) to open bills or request vendor refunds")
+    if ap_zero:
+        ap_work.append(f"Review and close {len(ap_zero)} vendor(s) with $0 AP balance — void or mark stale open bills as paid")
+    if not ap_work:
+        ap_work.append("Continue monitoring AP aging monthly; pay all bills before due dates to maintain vendor relationships")
+    ws_arap["A46"].value = "\n".join(f"• {w}" for w in ap_work)
+
     issues_found.extend(ap_issues)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1234,21 @@ async def run_assessment(
         if coa_issues else
         f"Chart of Accounts review shows no major issues. {total_account_count} active accounts with appropriate structure."
     )
+
+    # Work to be completed — COA
+    coa_work = []
+    if total_account_count > 150:
+        coa_work.append(f"Audit Chart of Accounts — archive or merge duplicate/unused accounts (currently {total_account_count} active)")
+    if inactive_count > 20:
+        coa_work.append(f"Review {inactive_count} inactive accounts — confirm they are truly inactive and can be archived")
+    if len(no_subtype) > 5:
+        coa_work.append(f"Assign correct account subtypes to {len(no_subtype)} accounts missing subtypes — required for proper financial reporting")
+    if not with_nums:
+        coa_work.append("Implement account numbering system: 1000s=Assets, 2000s=Liabilities, 3000s=Equity, 4000s=Income, 5000s=COGS, 6000s=Expenses")
+    if not coa_work:
+        coa_work.append("Chart of Accounts is well-organized. Review semi-annually to archive unused accounts.")
+    ws_coa["A15"].value = "\n".join(f"• {w}" for w in coa_work)
+
     issues_found.extend(coa_issues)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1122,6 +1283,19 @@ async def run_assessment(
         + "Confirm employer tax accounts are separate from employee withholding accounts."
     )
 
+    # Work to be completed — Payroll
+    pay_work = []
+    if has_payroll and not has_payroll_liability:
+        pay_work.append("Set up payroll liability accounts in COA: Payroll Tax Payable, Employee Benefits Payable, etc.")
+        pay_work.append("Review all payroll expense accounts and ensure proper split between gross wages, employer taxes, and benefits")
+    if has_payroll:
+        pay_work.append("Confirm with client: number of W-2 employees, 1099 contractors, and payroll frequency")
+        pay_work.append("Verify payroll processor and confirm payroll journal entries are correctly imported into QBO")
+        pay_work.append("Confirm employer FICA, FUTA, SUTA accounts are separate from employee withholding accounts")
+    else:
+        pay_work.append("Confirm with client whether they have employees or contractors — may need to set up payroll tracking")
+    ws_pay["A17"].value = "\n".join(f"• {w}" for w in pay_work)
+
     # ══════════════════════════════════════════════════════════════════════════
     # SHEET: Sales Tax
     # ══════════════════════════════════════════════════════════════════════════
@@ -1147,12 +1321,23 @@ async def run_assessment(
             "Verify client is using the QBO Sales Tax Center for all tracking and remittance. "
             "Confirm remittance schedule aligns with state requirements."
         )
+        st_work = [
+            "Verify all sales are running through QBO Sales Tax Center — not manual Sales Tax Payable entries",
+            f"Confirm remittance schedule with client — current balance is ${st_bal:,.2f}",
+            "Ensure correct tax rates are applied to taxable products/services",
+            "Review prior period sales tax returns for accuracy vs QBO reports",
+        ]
     else:
         ws_st["A10"].value = (
             "No sales tax accounts detected in Chart of Accounts. "
             "Confirm with client whether they are required to collect and remit sales tax. "
             "If applicable, set up the QBO Sales Tax Center."
         )
+        st_work = [
+            "Confirm with client whether they sell taxable goods or services in any state",
+            "If sales tax applies: set up QBO Sales Tax Center and configure correct rates by jurisdiction",
+        ]
+    ws_st["A15"].value = "\n".join(f"• {w}" for w in st_work)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Client info — overall findings (written last after all checks complete)
@@ -1178,6 +1363,290 @@ async def run_assessment(
             "Schedule a review meeting with the client to discuss findings and establish a cleanup timeline."
         )
     ws_client["A14"].value = overall_findings
+
+    # Work to be completed — Client info / Overall
+    client_work = [
+        f"Complete full diagnostic assessment for {client_name or 'client'} — Period: {period_label}",
+        "Review all findings in individual tabs and address items marked 'clean up needed'",
+        "Schedule a client meeting to discuss findings, agree on cleanup timeline, and assign responsibilities",
+    ]
+    if issues_found:
+        client_work.append(f"Prioritize {len(issues_found)} identified issue(s) in order: Banking → P&L → Balance Sheet → AR/AP → COA")
+    ws_client["A19"].value = "\n".join(f"• {w}" for w in client_work)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET: Reconciliation to Tax Return
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_tax_rec = wb["Reconciliation to Tax Return"]
+
+    # Determine if this applies (S-Corp, Partnership, C-Corp)
+    applies_to_tax_rec = any(t in (tax_org_type or "").upper() for t in ["S-CORP", "S CORP", "PARTNERSHIP", "C-CORP", "C CORP"])
+
+    ws_tax_rec["A14"].value = (
+        f"Tax entity type: {tax_org_type or 'Not specified'}. "
+        + (
+            "This assessment applies — obtain the most recent filed tax return and compare Balance Sheet totals "
+            f"(Total Assets, Total Liabilities, Total Equity) for the period ending {_fmt_period(period_to)}. "
+            "Any differences between QBO and the tax return should be investigated and documented. "
+            "Common causes: basis adjustments, depreciation differences, cash vs accrual timing, or missing journal entries."
+            if applies_to_tax_rec
+            else
+            f"For {tax_org_type or 'this entity type'}, a formal tax return balance sheet reconciliation may not be required "
+            "(e.g., Sole Proprietors on Schedule C with assets under $250K may not file a balance sheet). "
+            "Confirm with the tax preparer whether a reconciliation is needed for this client."
+        )
+    )
+    tax_rec_work = []
+    if applies_to_tax_rec:
+        tax_rec_work = [
+            f"Obtain the most recent tax return for {tax_org_type} from the client",
+            f"Run Balance Sheet in QBO as of the last filed tax return period and compare key totals",
+            "Document any differences and determine if adjusting journal entries are needed",
+            "Coordinate with tax preparer to ensure QBO reflects all tax return adjustments",
+        ]
+    else:
+        tax_rec_work = [
+            f"Confirm with client and tax preparer whether a tax return balance sheet reconciliation is required for {tax_org_type or 'this entity'}",
+            "If not required, note in file and skip this section",
+        ]
+    ws_tax_rec["A19"].value = "\n".join(f"• {w}" for w in tax_rec_work)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET: Undeposited Funds
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_udf = wb["Undeposited Funds"]
+
+    if undeposited_funds:
+        from datetime import date as _date, datetime as _datetime
+        today_dt = _date.today()
+        old_items = []
+        all_dates = []
+        udf_total_all = 0.0
+        for item in undeposited_funds:
+            amt = _safe_float(item.get("Amount", 0) or item.get("TotalAmt", 0))
+            udf_total_all += amt
+            txn_date_str = item.get("TxnDate", "")
+            if txn_date_str:
+                try:
+                    d = _date.fromisoformat(txn_date_str)
+                    all_dates.append(d)
+                    if (today_dt - d).days > 30:
+                        old_items.append((d, amt, item))
+                except Exception:
+                    pass
+
+        has_old = bool(old_items)
+        oldest_date = min(all_dates) if all_dates else None
+        old_total = sum(a for _, a, _ in old_items)
+
+        ws_udf["J5"].value = (
+            f"YES — {len(old_items)} item(s) older than 30 days (total: ${old_total:,.2f})"
+            if has_old else
+            "No — all items are within 30 days"
+        )
+        ws_udf["Q5"].value = (
+            oldest_date.strftime("%m/%d/%Y") if oldest_date else "N/A"
+        )
+
+        udf_findings = (
+            f"Undeposited Funds contains {len(undeposited_funds)} item(s) totaling ${udf_total_all:,.2f}. "
+        )
+        if has_old:
+            udf_findings += (
+                f"{len(old_items)} item(s) are older than 30 days (${old_total:,.2f}) — "
+                f"oldest dates to {oldest_date.strftime('%m/%d/%Y') if oldest_date else 'unknown'}. "
+                "These may represent forgotten deposits, duplicate entries, or transactions that should have been voided. "
+                "Review each item and either deposit, match to an existing bank transaction, or void if erroneous."
+            )
+        else:
+            udf_findings += "All items appear to be recent (within 30 days). Verify each item corresponds to an actual pending deposit."
+
+        ws_udf["A9"].value = udf_findings
+        udf_work = []
+        if has_old:
+            udf_work.append(f"Review {len(old_items)} Undeposited Funds item(s) older than 30 days — deposit, match, or void each one")
+            if oldest_date:
+                udf_work.append(f"Oldest item dates to {oldest_date.strftime('%m/%d/%Y')} — investigate and resolve")
+        udf_work.append("Ensure all customer payments received are promptly deposited and cleared from Undeposited Funds")
+        udf_work.append("Do not use Undeposited Funds as a holding account for more than a few days")
+        ws_udf["A15"].value = "\n".join(f"• {w}" for w in udf_work)
+    else:
+        ws_udf["J5"].value = "No items found"
+        ws_udf["Q5"].value = "N/A"
+        ws_udf["A9"].value = "No items found in Undeposited Funds. Confirm client is consistently depositing payments and clearing this account."
+        ws_udf["A15"].value = "• Verify Undeposited Funds account is cleared and confirm all customer payments are deposited promptly."
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET: Products & Services
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_ps = wb["Products & Services"]
+
+    active_items = [it for it in (items_list or []) if it.get("Active", True)]
+    total_items = len(active_items)
+
+    service_items   = [it for it in active_items if it.get("Type") == "Service"]
+    product_items   = [it for it in active_items if it.get("Type") in ("Inventory", "NonInventory")]
+    inventory_items = [it for it in active_items if it.get("Type") == "Inventory"]
+    bundle_items    = [it for it in active_items if it.get("Type") == "Group"]
+
+    # E4 — Is number of items reasonable?
+    if total_items == 0:
+        ws_ps["E4"].value = "Unable to retrieve Items list from QBO."
+    elif total_items > 300:
+        ws_ps["E4"].value = (
+            f"REVIEW — {total_items} active items found. This may be excessive. "
+            "Consider consolidating duplicate or overly granular items."
+        )
+    elif total_items > 150:
+        ws_ps["E4"].value = f"REVIEW — {total_items} items found. Consider whether all items are actively used and necessary."
+    else:
+        ws_ps["E4"].value = f"OK — {total_items} active item(s) appears reasonable ({len(service_items)} services, {len(product_items)} products, {len(bundle_items)} bundles)."
+
+    # E5 — Is the list reasonable for the industry?
+    has_both = bool(service_items) and bool(product_items)
+    ws_ps["E5"].value = (
+        f"OK — Mix of {len(service_items)} service(s) and {len(product_items)} product(s). "
+        "Verify this mix aligns with the client's business model and that each item is actively billed."
+        if has_both else
+        f"OK — {total_items} {'service' if service_items else 'product'} item(s). "
+        "Verify all items are relevant to the client's current operations and pricing is current."
+    ) if total_items > 0 else "No items found."
+
+    # E6 — Are types used correctly?
+    no_income_acct = [
+        it for it in active_items
+        if not it.get("IncomeAccountRef") and it.get("Type") in ("Service", "NonInventory")
+    ]
+    if no_income_acct:
+        ws_ps["E6"].value = (
+            f"REVIEW — {len(no_income_acct)} item(s) have no income account mapped: "
+            + ", ".join(it.get("Name", "") for it in no_income_acct[:5])
+            + ". Set correct income accounts for each item."
+        )
+    elif inventory_items and not any(it.get("AssetAccountRef") for it in inventory_items):
+        ws_ps["E6"].value = "REVIEW — Inventory items found but asset account may not be properly set. Verify each inventory item has an Asset Account assigned."
+    else:
+        ws_ps["E6"].value = "OK — Item types appear to be correctly assigned. Spot-check income/COGS account mappings."
+
+    # E7 — Correctly mapped to income/COGS accounts?
+    wrong_income = [
+        it for it in active_items
+        if it.get("IncomeAccountRef")
+        and any(kw in (it.get("IncomeAccountRef", {}).get("name", "") or "").lower()
+                for kw in ["expense", "cogs", "cost of"])
+    ]
+    if wrong_income:
+        names = ", ".join(it.get("Name", "") for it in wrong_income[:3])
+        ws_ps["E7"].value = (
+            f"REVIEW — {len(wrong_income)} item(s) mapped to expense/COGS accounts instead of income accounts: {names}. "
+            "Remap to correct income accounts."
+        )
+    else:
+        ws_ps["E7"].value = (
+            f"OK — Income account mappings appear reasonable. "
+            f"{len(inventory_items)} inventory item(s) should also have COGS and asset accounts assigned."
+        ) if total_items > 0 else "No items to review."
+
+    # A9 — P&S findings
+    ps_issues = []
+    if total_items > 300:
+        ps_issues.append(f"Products & Services list has {total_items} items — likely has duplicates or outdated items")
+    if no_income_acct:
+        ps_issues.append(f"{len(no_income_acct)} item(s) missing income account mapping")
+    if wrong_income:
+        ps_issues.append(f"{len(wrong_income)} item(s) mapped to wrong account type")
+    ws_ps["A10"].value = (
+        (f"PRODUCTS & SERVICES ISSUES ({len(ps_issues)}):\n" + "\n".join(f"• {i}" for i in ps_issues)
+         + f"\n\nTotal active items: {total_items}")
+        if ps_issues else
+        f"Products & Services review shows no major issues. {total_items} active items with appropriate structure."
+    )
+
+    # A14 — Work to be completed
+    ps_work = []
+    if no_income_acct:
+        ps_work.append(f"Map correct income accounts to {len(no_income_acct)} item(s) missing income account")
+    if wrong_income:
+        ps_work.append(f"Correct income account mapping for {len(wrong_income)} item(s) mapped to expense/COGS accounts")
+    if total_items > 150:
+        ps_work.append(f"Review and consolidate Products & Services list — {total_items} items may be excessive")
+    if inventory_items:
+        ps_work.append(f"Verify {len(inventory_items)} inventory item(s) each have Asset Account and COGS account assigned")
+    if not ps_work:
+        ps_work.append("Products & Services list appears well-maintained. Review annually to deactivate unused items.")
+    ws_ps["A15"].value = "\n".join(f"• {w}" for w in ps_work)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHEET: Inventory
+    # ══════════════════════════════════════════════════════════════════════════
+    ws_inv = wb["Inventory"]
+    inv_issues = []
+
+    has_inventory_items = bool(inventory_items)
+    inv_asset_bal = _find_amount(bs_rows, "inventory asset", "inventory")
+
+    # O4 — Inventory Valuation Summary
+    ws_inv["O4"].value = (
+        f"Run Inventory Valuation Summary report in QBO as of {_fmt_period(period_to)}."
+        if has_inventory_items else
+        "No inventory items found in Products & Services list."
+    )
+    # O5 — Agree to Balance Sheet
+    if has_inventory_items and abs(inv_asset_bal) > 0.01:
+        ws_inv["O5"].value = f"Balance Sheet shows Inventory asset of ${inv_asset_bal:,.2f}. Agree this to the Inventory Valuation Summary total."
+    elif has_inventory_items:
+        ws_inv["O5"].value = "Inventory items exist but no Inventory Asset balance found on Balance Sheet. Investigate."
+        inv_issues.append("Inventory items found but no Inventory asset balance on Balance Sheet")
+    else:
+        ws_inv["O5"].value = "No inventory items — skip this step."
+
+    # O6 — Negative quantities
+    ws_inv["O6"].value = (
+        "Review Inventory Valuation Summary for any items with negative QTY — indicates a receiving or posting error."
+        if has_inventory_items else "N/A — no inventory items."
+    )
+    # O7 — Inventory Shrinkage
+    ws_inv["O7"].value = (
+        "Review Inventory Shrinkage account for large or unexpected adjustments."
+        if has_inventory_items else "N/A — no inventory items."
+    )
+    # O8 — Incorrect item types
+    ws_inv["O8"].value = (
+        f"Review {len(inventory_items)} inventory item(s) to confirm none are set up as service or non-inventory type incorrectly."
+        if has_inventory_items else "N/A — no inventory items."
+    )
+
+    # A10/F10 — Inventory totals (A9/F9/K9 are column labels; data goes in row 10)
+    ws_inv["A10"].value = f"${inv_asset_bal:,.2f}" if has_inventory_items else "$0.00"
+    ws_inv["F10"].value = f"${inv_asset_bal:,.2f}" if has_inventory_items else "$0.00"
+    # K10 has formula =A10-F10; leave it in place
+
+    # A13 — Inventory findings
+    ws_inv["A14"].value = (
+        (f"INVENTORY ISSUES ({len(inv_issues)}):\n" + "\n".join(f"• {i}" for i in inv_issues))
+        if inv_issues else
+        (
+            f"Client has {len(inventory_items)} inventory item(s) in QBO. "
+            "Run Inventory Valuation Summary and agree total to Balance Sheet. "
+            "Review for negative quantities and investigate Inventory Shrinkage account."
+            if has_inventory_items else
+            "No inventory items found. If client sells physical goods, confirm whether inventory tracking is needed (requires QBO Plus or higher)."
+        )
+    )
+
+    # A18 — Work to be completed
+    inv_work = []
+    if has_inventory_items:
+        inv_work.append(f"Run Inventory Valuation Summary report as of {_fmt_period(period_to)} and agree total to Balance Sheet")
+        inv_work.append("Review for negative quantity items — investigate and correct receiving or posting errors")
+        inv_work.append("Review Inventory Shrinkage account for large adjustments")
+        inv_work.append(f"Verify all {len(inventory_items)} inventory item(s) are correctly set up with Asset, COGS, and Income accounts")
+        if inv_issues:
+            inv_work.append("Reconcile difference between Inventory Valuation Summary and Balance Sheet")
+    else:
+        inv_work.append("Confirm with client whether inventory tracking is needed")
+        inv_work.append("If yes: upgrade to QBO Plus, set up inventory items in Products & Services")
+    ws_inv["A19"].value = "\n".join(f"• {w}" for w in inv_work)
 
     # ── Serialize and stream ────────────────────────────────────────────────────
     buf = io.BytesIO()
