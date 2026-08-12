@@ -503,16 +503,32 @@ async def get_bank_accounts(
     except Exception as e:
         raise HTTPException(502, f"Error fetching accounts from QBO: {e}")
 
+    def _next_statement_date(last_reconcile: str) -> str:
+        """Given last reconcile date (YYYY-MM-DD), return last day of following month."""
+        try:
+            from datetime import date
+            import calendar
+            d = date.fromisoformat(last_reconcile)
+            # Move to first day of month after next
+            month = d.month + 1 if d.month < 12 else 1
+            year  = d.year if d.month < 12 else d.year + 1
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        except Exception:
+            return ""
+
     bank_accounts = [
         {
-            "id":           a.get("Id", ""),
-            "name":         a.get("Name", ""),
-            "full_name":    a.get("FullyQualifiedName", a.get("Name", "")),
-            "account_type": a.get("AccountType", ""),
-            "account_sub_type": a.get("AccountSubType", ""),
-            "balance":      a.get("CurrentBalance", 0.0),
-            "balance_fmt":  f"${a.get('CurrentBalance', 0.0):,.2f}",
-            "currency":     a.get("CurrencyRef", {}).get("value", "USD"),
+            "id":                  a.get("Id", ""),
+            "name":                a.get("Name", ""),
+            "full_name":           a.get("FullyQualifiedName", a.get("Name", "")),
+            "account_type":        a.get("AccountType", ""),
+            "account_sub_type":    a.get("AccountSubType", ""),
+            "balance":             a.get("CurrentBalance", 0.0),
+            "balance_fmt":         f"${a.get('CurrentBalance', 0.0):,.2f}",
+            "currency":            a.get("CurrencyRef", {}).get("value", "USD"),
+            "last_reconcile_date": a.get("LastReconcileDate", ""),
+            "next_statement_date": _next_statement_date(a.get("LastReconcileDate", "")),
         }
         for a in accounts
         if a.get("AccountType") in ("Bank", "Credit Card") and a.get("Active", True)

@@ -381,6 +381,8 @@ export interface QBOBankAccount {
   balance: number
   balance_fmt: string
   currency: string
+  last_reconcile_date: string   // YYYY-MM-DD or ""
+  next_statement_date: string   // YYYY-MM-DD or ""
 }
 
 export interface QBODonor {

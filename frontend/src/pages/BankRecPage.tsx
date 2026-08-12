@@ -36,15 +36,36 @@ export function BankRecPage() {
   // Bank accounts dropdown
   const [bankAccounts, setBankAccounts] = useState<QBOBankAccount[]>([])
   const [loadingAccounts, setLoadingAccounts] = useState(false)
+  const [selectedAccount, setSelectedAccount] = useState<QBOBankAccount | null>(null)
 
   useEffect(() => {
     if (!selectedRealmId) return
     setLoadingAccounts(true)
+    setBankAccounts([])
+    setSelectedAccount(null)
+    setAccountName('')
     api.qboData.bankAccounts(selectedRealmId)
       .then(d => setBankAccounts(d.accounts))
       .catch(() => setBankAccounts([]))
       .finally(() => setLoadingAccounts(false))
   }, [selectedRealmId])
+
+  // When account is selected from dropdown, pre-fill statement date and show last rec info
+  const handleAccountSelect = (fullName: string) => {
+    setAccountName(fullName)
+    const acct = bankAccounts.find(a => a.full_name === fullName) ?? null
+    setSelectedAccount(acct)
+    if (acct?.next_statement_date) {
+      setStatementDate(acct.next_statement_date)
+    }
+  }
+
+  // Format date for display: YYYY-MM-DD → MM/DD/YYYY
+  const fmtDate = (d: string) => {
+    if (!d) return '—'
+    const [y, m, day] = d.split('-')
+    return `${m}/${day}/${y}`
+  }
 
   const mutation = useMutation({
     mutationFn: () => {
@@ -134,7 +155,7 @@ export function BankRecPage() {
                       <select
                         className="input appearance-none pr-8"
                         value={accountName}
-                        onChange={e => setAccountName(e.target.value)}
+                        onChange={e => handleAccountSelect(e.target.value)}
                       >
                         <option value="">— Select bank account —</option>
                         {bankAccounts.map(acct => (
@@ -158,6 +179,41 @@ export function BankRecPage() {
                     />
                   )}
                 </div>
+
+                {/* Last reconciliation info */}
+                {selectedAccount && (
+                  <div className={cn(
+                    'rounded-xl border px-4 py-3 text-xs space-y-2',
+                    selectedAccount.last_reconcile_date
+                      ? 'bg-emerald-50 border-emerald-200'
+                      : 'bg-amber-50 border-amber-200',
+                  )}>
+                    {selectedAccount.last_reconcile_date ? (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-emerald-800">Last Reconciliation</span>
+                          <span className="font-bold text-emerald-700">{fmtDate(selectedAccount.last_reconcile_date)}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-emerald-700">
+                          <span>Current QBO Balance</span>
+                          <span className="font-semibold">{selectedAccount.balance_fmt}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-emerald-600">
+                          <span>Next period suggested</span>
+                          <span className="font-semibold">{fmtDate(selectedAccount.next_statement_date)}</span>
+                        </div>
+                        <p className="text-[11px] text-emerald-600 pt-1 border-t border-emerald-200">
+                          Statement date pre-filled to next period. Enter the ending balance from your bank statement below.
+                        </p>
+                      </>
+                    ) : (
+                      <div className="flex items-center gap-2 text-amber-700">
+                        <AlertTriangle size={13} className="shrink-0" />
+                        <span>This account has never been reconciled in QBO.</span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
