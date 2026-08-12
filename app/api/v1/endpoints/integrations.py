@@ -122,6 +122,27 @@ async def qbo_companies(
     result = await db.execute(select(QBOToken))
     tokens = result.scalars().all()
     now = datetime.now(timezone.utc)
+
+    # For tokens without a saved company name, fetch from QBO and persist
+    needs_commit = False
+    for t in tokens:
+        if not t.company_name and now < t.expires_at:
+            try:
+                client = QBOClient(
+                    realm_id=t.realm_id,
+                    access_token=t.access_token,
+                    refresh_token=t.refresh_token,
+                    expires_at=t.expires_at,
+                )
+                name = await client.get_company_name()
+                if name:
+                    t.company_name = name
+                    needs_commit = True
+            except Exception:
+                pass
+    if needs_commit:
+        await db.commit()
+
     return [
         {
             "realm_id": t.realm_id,
