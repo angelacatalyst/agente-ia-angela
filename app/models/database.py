@@ -17,7 +17,11 @@ settings = get_settings()
 
 _db_url = settings.async_database_url
 
-# asyncpg requires SSL for Render/cloud PostgreSQL; pass via connect_args
+# Strip sslmode query param from URL — asyncpg handles SSL via connect_args, not URL params
+import re as _re
+_db_url = _re.sub(r"[?&]sslmode=[^&]*", "", _db_url)
+
+# asyncpg requires SSL for Render/Neon/cloud PostgreSQL; pass via connect_args
 _connect_args: dict = {}
 if "asyncpg" in _db_url and "sqlite" not in _db_url:
     import ssl as _ssl
