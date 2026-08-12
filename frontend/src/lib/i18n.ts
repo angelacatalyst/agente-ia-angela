@@ -24,6 +24,7 @@ const translations = {
     'nav.vendors':      'Vendors',
     'nav.sops':         'SOPs',
     'nav.eod':          'EOD Reports',
+    'nav.assessment':   'Assessment',
     'nav.settings':     'Settings',
 
     // App
@@ -123,6 +124,7 @@ const translations = {
     'nav.vendors':      'Proveedores',
     'nav.sops':         'SOPs',
     'nav.eod':          'Reportes EOD',
+    'nav.assessment':   'Assessment',
     'nav.settings':     'Configuración',
 
     // App
