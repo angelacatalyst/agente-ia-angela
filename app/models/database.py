@@ -101,6 +101,7 @@ class QBOToken(Base):
 
     realm_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(255), index=True)
+    company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     access_token: Mapped[str] = mapped_column(Text)
     refresh_token: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -129,6 +129,16 @@ class QBOClient:
     async def get_ap_aging(self) -> dict:
         return await self._get("reports/AgedPayables")
 
+    async def get_company_name(self) -> str:
+        """Return the company's legal name from QBO CompanyInfo."""
+        try:
+            rows = await self._query("SELECT * FROM CompanyInfo")
+            if rows:
+                return rows[0].get("CompanyName", "") or rows[0].get("LegalName", "")
+        except Exception:
+            pass
+        return ""
+
     # ── Transactions ──────────────────────────────────────────────────────────
 
     async def get_undeposited_funds(self) -> list[dict]:

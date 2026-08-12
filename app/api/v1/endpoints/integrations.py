@@ -16,6 +16,7 @@ from app.integrations.quickbooks.auth import (
     exchange_code_for_tokens,
     get_authorization_url,
 )
+from app.integrations.quickbooks.client import QBOClient
 from app.models.database import QBOToken
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
@@ -49,6 +50,19 @@ async def qbo_callback(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}") from exc
 
+    # Fetch company name from QBO using the fresh token
+    company_name: str | None = None
+    try:
+        temp_client = QBOClient(
+            realm_id=realmId,
+            access_token=token_data["access_token"],
+            refresh_token=token_data["refresh_token"],
+            expires_at=token_data["expires_at"],
+        )
+        company_name = await temp_client.get_company_name() or None
+    except Exception:
+        pass  # name is optional — don't fail the whole callback
+
     # Upsert token record
     existing = await db.get(QBOToken, realmId)
     if existing:
@@ -56,17 +70,20 @@ async def qbo_callback(
         existing.refresh_token = token_data["refresh_token"]
         existing.expires_at = token_data["expires_at"]
         existing.updated_at = datetime.now(timezone.utc)
+        if company_name:
+            existing.company_name = company_name
     else:
         db.add(QBOToken(
             realm_id=realmId,
             user_id="angela",
+            company_name=company_name,
             access_token=token_data["access_token"],
             refresh_token=token_data["refresh_token"],
             expires_at=token_data["expires_at"],
         ))
 
     await db.commit()
-    return {"status": "Empresa conectada exitosamente", "realm_id": realmId}
+    return {"status": "Empresa conectada exitosamente", "realm_id": realmId, "company_name": company_name}
 
 
 @router.get("/qbo/status", summary="Check QBO connection status")
@@ -108,7 +125,7 @@ async def qbo_companies(
     return [
         {
             "realm_id": t.realm_id,
-            "company_name": _COMPANY_NAMES.get(t.realm_id, f"Company {t.realm_id}"),
+            "company_name": t.company_name or _COMPANY_NAMES.get(t.realm_id, f"Company {t.realm_id}"),
             "connected": True,
             "token_expired": now >= t.expires_at,
             "expires_at": t.expires_at.isoformat(),
