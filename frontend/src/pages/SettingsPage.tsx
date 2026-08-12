@@ -182,6 +182,12 @@ export function SettingsPage() {
                   onSelect={() => setSelectedRealmId(c.realm_id)}
                 />
               ))}
+              <a
+                href={QBO_AUTHORIZE_URL}
+                className="flex items-center justify-center gap-2 w-full mt-2 py-2.5 rounded-xl border border-dashed border-primary-300 text-[12px] font-semibold text-primary-600 hover:bg-primary-50 transition-colors"
+              >
+                <ExternalLink size={13} /> Connect another company
+              </a>
             </div>
           ) : (
             <div className="rounded-xl border border-dashed border-surface-200 bg-surface-50 p-6 text-center space-y-3">
