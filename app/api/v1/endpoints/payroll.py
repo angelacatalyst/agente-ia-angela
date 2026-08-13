@@ -43,14 +43,20 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "3010":             0.72,
             "Community Asset":  0.20,
         },
-        # B3 Living Cities 2026 ($12,500) → First Citizen Bank ($20,000) → 3010 Predevelopment Grant
+        # Pool 1: clase 3010 → 3010 Predevelopment Grant exclusivamente
+        # Pool 2: Fundraising + Community Asset → B3 Living Cities → First Citizen Bank
         "grant_rules": [
             {
-                "pool_classes": ["Fundraising", "3010", "Community Asset"],
+                "pool_classes": ["3010"],
                 "waterfall": [
-                    {"name": "B3 Living Cities 2026",     "annual_budget": 12500.00},
-                    {"name": "First Citizen Bank",         "annual_budget": 20000.00},
-                    {"name": "3010 Predevelopment Grant",  "annual_budget": 500000.00},
+                    {"name": "3010 Predevelopment Grant", "annual_budget": 500000.00},
+                ],
+            },
+            {
+                "pool_classes": ["Fundraising", "Community Asset"],
+                "waterfall": [
+                    {"name": "B3 Living Cities 2026", "annual_budget": 12500.00},
+                    {"name": "First Citizen Bank",     "annual_budget": 20000.00},
                 ],
             },
         ],
@@ -71,18 +77,24 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.05,
             "Festival del Platano": 0.05,
         },
-        # 3C MHA 25-26 Q1 ($30k) → 3C MHA 25-26 Q2 ($25k) → MHFA 2026-2027 Q4-26 ($12.5k, after 3C $25k exhausted) → 3010 Predevelopment
+        # Pool 1: clase 3010 → 3010 Predevelopment Grant exclusivamente
+        # Pool 2: resto de clases → 3C MHA Q1 → Q2 → MHFA 2026-2027 → PENDING cuando se agoten
         "grant_rules": [
             {
+                "pool_classes": ["3010"],
+                "waterfall": [
+                    {"name": "3010 Predevelopment Grant", "annual_budget": 500000.00},
+                ],
+            },
+            {
                 "pool_classes": [
-                    "Fundraising", "Operations", "3010", "Community Asset",
+                    "Fundraising", "Operations", "Community Asset",
                     "ILB", "Smithsonian", "Festival del Platano",
                 ],
                 "waterfall": [
-                    {"name": "3C MHA 25-26 Q1",          "annual_budget": 30000.00},
-                    {"name": "3C MHA 25-26 Q2",          "annual_budget": 25000.00},
-                    {"name": "MHFA 2026-2027",            "annual_budget": 12500.00},
-                    {"name": "3010 Predevelopment Grant", "annual_budget": 500000.00},
+                    {"name": "3C MHA 25-26 Q1", "annual_budget": 30000.00},
+                    {"name": "3C MHA 25-26 Q2", "annual_budget": 25000.00},
+                    {"name": "MHFA 2026-2027",   "annual_budget": 12500.00},
                 ],
             },
         ],
@@ -584,6 +596,21 @@ CLASS_NAME_ALIASES: dict[str, str] = {
     "ILB":  "Impact Leadership Bootcamp",
 }
 
+# Matrix grant name → exact QBO Customer DisplayName (or reliable substring).
+# Used so fuzzy matching never picks the wrong customer when multiple grants
+# share a funder name (e.g. two City of Miami grants).
+GRANT_NAME_ALIASES: dict[str, str] = {
+    "3C MHA 25-26 Q1":               "3C MHA 25-26 ($75,000) $30,000 2026 01",
+    "3C MHA 25-26 Q2":               "3C MHA 25-26 ($75,000) $25,000 2026 02",
+    "MHFA 2026-2027":                "MHFA 2026-2027 ($25,000) Q4-26",
+    "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
+    "Citi Community Progress Grant": "Citi- Community Progress Maker Grant",
+    "City of Miami District 1 MFE":  "City of Miami District 1- MFE Funds",
+    "Truist Foundation":             "Truist Foundation ($100,000)",
+    "B3 Living Cities 2026":         "B3- Living Cities 2026",
+    "First Citizen Bank":            "First Citizen Bank ($20,000)",
+}
+
 # QBO customer name for lines that have no grant assigned yet
 PENDING_GRANT_NAME = "Pending Allocations Grant"
 
@@ -1056,10 +1083,13 @@ async def post_payroll_to_qbo(
         )
 
     def _match_customer(name: str) -> dict | None:
+        # Use exact alias if defined — avoids fuzzy mismatch when multiple
+        # grants share the same funder (e.g. two City of Miami customers)
+        search = GRANT_NAME_ALIASES.get(name, name)
         return (
-            _best_qbo_match(name, qbo_customers, "DisplayName")
-            or _best_qbo_match(name, qbo_customers, "FullyQualifiedName")
-            or _best_qbo_match(name, qbo_customers, "CompanyName")
+            _best_qbo_match(search, qbo_customers, "DisplayName")
+            or _best_qbo_match(search, qbo_customers, "FullyQualifiedName")
+            or _best_qbo_match(search, qbo_customers, "CompanyName")
         )
 
     vendor_match   = _match_vendor(payroll_vendor)
