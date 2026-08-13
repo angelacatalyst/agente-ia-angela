@@ -214,6 +214,27 @@ class QBOClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_purchases_by_date(self, date_from: str, date_to: str) -> list[dict]:
+        """Return all Purchase (Expense) transactions within a date range."""
+        return await self._query(
+            f"SELECT * FROM Purchase WHERE TxnDate >= '{date_from}' "
+            f"AND TxnDate <= '{date_to}' MAXRESULTS 1000"
+        )
+
+    async def void_purchase(self, purchase_id: str, sync_token: str) -> dict:
+        """Void a QBO Purchase by Id + SyncToken. Preserves audit trail."""
+        await self._ensure_token()
+        url = f"{self._base}/purchase"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url,
+                headers=self._headers(),
+                params={**self._params(), "operation": "void"},
+                json={"Id": purchase_id, "SyncToken": sync_token},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     # ── Chart of Accounts ─────────────────────────────────────────────────────
 
     async def get_chart_of_accounts(self) -> list[dict]:

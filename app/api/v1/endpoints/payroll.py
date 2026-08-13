@@ -1298,3 +1298,291 @@ async def post_payroll_to_qbo(
         "warnings":      all_warnings,
         "budget_status": budget_status,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /payroll/void-and-repost
+# Voids all agent-created Expenses (DocNumber starts with "PR-") in a date
+# range, then re-posts them from a Gusto file using the current ALLOCATION_MATRIX.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/void-and-repost")
+async def void_and_repost_historical(
+    file: UploadFile = File(...),
+    realm_id: str = Query(...),
+    date_from: str = Query(..., description="Start date YYYY-MM-DD (e.g. 2025-01-01)"),
+    date_to: str = Query(..., description="End date YYYY-MM-DD (e.g. 2025-07-31)"),
+    expense_account: str = Query("Salaries & Wages"),
+    payroll_vendor: str = Query("Gusto"),
+    bank_account: str = Query("Payroll"),
+    tax_liability_account: str = Query("Payroll Tax"),
+    health_liability_account: str = Query("Payroll Health"),
+    tax_expense_account: str = Query("Payroll Taxes"),
+    health_expense_account: str = Query("Health Benefits"),
+    dental_expense_account: str = Query("Vision and Dental"),
+    dental_vendor: str = Query("The Guardian"),
+    dry_run: bool = Query(True, description="true = preview only; false = void + repost"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Void all agent payroll Expenses (DocNumber starts 'PR-') in the date range,
+    then re-post every pay period in the Gusto file that falls within that range
+    using the current ALLOCATION_MATRIX percentages.
+
+    Safe workflow:
+      1. Run with dry_run=true → review what will be voided and what will be re-posted.
+      2. Run with dry_run=false → void old entries, post corrected ones.
+    """
+    # ── 1. Parse Gusto file ───────────────────────────────────────────────────
+    if not file.filename or not file.filename.endswith(".xlsx"):
+        raise HTTPException(400, "Please upload a .xlsx Gusto file.")
+    data = await file.read()
+    try:
+        raw_periods = _parse_gusto(data)
+    except Exception as e:
+        raise HTTPException(422, f"Could not parse Gusto file: {e}")
+    if not raw_periods:
+        raise HTTPException(422, "No pay periods found in file.")
+
+    enriched, budget_status = _apply_waterfall(raw_periods)
+
+    # Filter periods that fall within date_from / date_to
+    from datetime import date as _date
+    def _in_range(payday: str) -> bool:
+        try:
+            d = _date.fromisoformat(payday)
+            return _date.fromisoformat(date_from) <= d <= _date.fromisoformat(date_to)
+        except ValueError:
+            return False
+
+    periods_in_range = [p for p in enriched if _in_range(p.get("payday", ""))]
+    if not periods_in_range:
+        raise HTTPException(
+            422,
+            f"No pay periods in the Gusto file fall within {date_from} – {date_to}. "
+            f"Periods found: {[p['period'] for p in enriched]}"
+        )
+
+    # ── 2. Init QBO client ────────────────────────────────────────────────────
+    qbo = await get_qbo_client_for_realm(realm_id, db)
+    if not qbo:
+        raise HTTPException(401, f"No QBO connection for realm {realm_id}.")
+
+    # ── 3. Find existing agent payroll Expenses ───────────────────────────────
+    try:
+        all_purchases = await qbo.get_purchases_by_date(date_from, date_to)
+    except Exception as e:
+        raise HTTPException(502, f"Error fetching QBO purchases: {e}")
+
+    # Agent expenses always have DocNumber starting with "PR-"
+    agent_expenses = [
+        p for p in all_purchases
+        if (p.get("DocNumber") or "").startswith("PR-")
+    ]
+
+    void_preview = [
+        {
+            "id":         p["Id"],
+            "doc_number": p.get("DocNumber"),
+            "date":       p.get("TxnDate"),
+            "amount":     p.get("TotalAmt"),
+            "private_note": p.get("PrivateNote", ""),
+        }
+        for p in agent_expenses
+    ]
+
+    if dry_run:
+        # Build re-post preview (same as post-to-qbo dry_run per period)
+        repost_preview = []
+        for period in periods_in_range:
+            repost_preview.append({
+                "period":     period["period"],
+                "payday":     period["payday"],
+                "employees":  [
+                    e.get("full_name", f"{e['first']} {e['last']}")
+                    for e in period["employees"] if e.get("allocation")
+                ],
+                "period_total_cost": period["period_total_cost"],
+            })
+        return {
+            "dry_run": True,
+            "date_range": {"from": date_from, "to": date_to},
+            "to_void": {
+                "count":    len(agent_expenses),
+                "expenses": void_preview,
+            },
+            "to_repost": {
+                "period_count": len(periods_in_range),
+                "periods":      repost_preview,
+            },
+            "message": (
+                f"Will void {len(agent_expenses)} existing payroll expenses "
+                f"and re-post {len(periods_in_range)} periods "
+                f"with current allocation percentages. "
+                f"Set dry_run=false to execute."
+            ),
+        }
+
+    # ── 4. Fetch QBO reference data ───────────────────────────────────────────
+    try:
+        qbo_vendors     = await qbo.get_vendors()
+        qbo_accounts    = await qbo.get_chart_of_accounts()
+        qbo_classes     = await qbo.get_classes()
+        qbo_customers   = await qbo.get_customers()
+        qbo_departments = await qbo.get_departments()
+    except Exception as e:
+        raise HTTPException(502, f"Error fetching QBO reference data: {e}")
+
+    qbo_banks = [a for a in qbo_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
+
+    def _mv(name: str) -> dict | None:
+        return (_best_qbo_match(name, qbo_vendors, "DisplayName")
+                or _best_qbo_match(name, qbo_vendors, "CompanyName"))
+
+    def _ma(name: str, pool: list[dict]) -> dict | None:
+        return (_best_qbo_match(name, pool, "Name")
+                or _best_qbo_match(name, pool, "FullyQualifiedName"))
+
+    def _mc(name: str) -> dict | None:
+        return (_best_qbo_match(name, qbo_customers, "DisplayName")
+                or _best_qbo_match(name, qbo_customers, "FullyQualifiedName")
+                or _best_qbo_match(name, qbo_customers, "CompanyName"))
+
+    vendor_match        = _mv(payroll_vendor)
+    account_match       = _ma(expense_account, qbo_accounts)
+    bank_match          = _ma(bank_account, qbo_banks) or _ma(bank_account, qbo_accounts)
+    tax_match           = _ma(tax_liability_account, qbo_accounts) if tax_liability_account.strip() else None
+    health_match        = _ma(health_liability_account, qbo_accounts) if health_liability_account.strip() else None
+    tax_exp_match       = _ma(tax_expense_account, qbo_accounts)
+    health_exp_match    = _ma(health_expense_account, qbo_accounts)
+    dental_exp_match    = _ma(dental_expense_account, qbo_accounts)
+    dental_vendor_match = _mv(dental_vendor) if dental_vendor.strip() else None
+
+    if not vendor_match or not bank_match or not account_match:
+        missing = []
+        if not vendor_match:    missing.append(f"vendor '{payroll_vendor}'")
+        if not bank_match:      missing.append(f"bank account '{bank_account}'")
+        if not account_match:   missing.append(f"expense account '{expense_account}'")
+        raise HTTPException(422, f"QBO lookup failed for: {', '.join(missing)}. Run dry_run=true first.")
+
+    # ── 5. Void existing agent expenses ──────────────────────────────────────
+    voided: list[dict] = []
+    void_errors: list[str] = []
+
+    for p in agent_expenses:
+        try:
+            await qbo.void_purchase(p["Id"], p["SyncToken"])
+            voided.append({
+                "id":         p["Id"],
+                "doc_number": p.get("DocNumber"),
+                "date":       p.get("TxnDate"),
+                "amount":     p.get("TotalAmt"),
+            })
+        except Exception as e:
+            void_errors.append(f"Could not void {p.get('DocNumber')} (id {p['Id']}): {e}")
+
+    # ── 6. Re-post each period with current matrix ────────────────────────────
+    all_created: list[dict] = []
+    all_post_errors: list[str] = []
+    all_warnings: list[str] = []
+
+    for period in periods_in_range:
+        # Build class + customer maps for this period
+        all_classes_p: set[str] = set()
+        all_grants_p: set[str] = set()
+        has_pending_p = False
+        for emp in period["employees"]:
+            for row in _get_expense_lines_for_emp(emp):
+                all_classes_p.add(row["cls"])
+                if row["grant"] == "PENDING":
+                    has_pending_p = True
+                else:
+                    all_grants_p.add(row["grant"])
+
+        class_map_p: dict[str, str] = {}
+        customer_map_p: dict[str, str] = {}
+        for cls in all_classes_p:
+            qbo_cls_name = CLASS_NAME_ALIASES.get(cls, cls)
+            m = (_best_qbo_match(qbo_cls_name, qbo_classes, "Name")
+                 or _best_qbo_match(qbo_cls_name, qbo_classes, "FullyQualifiedName")
+                 or _best_qbo_match(cls, qbo_classes, "Name"))
+            class_map_p[cls] = m["Id"] if m else ""
+        for g in all_grants_p:
+            m = _mc(g)
+            customer_map_p[g] = m["Id"] if m else ""
+        if has_pending_p:
+            m = _mc(PENDING_GRANT_NAME)
+            customer_map_p["PENDING"] = m["Id"] if m else ""
+
+        # Department map
+        department_map_p: dict[str, str] = {}
+        for emp in period["employees"]:
+            key = emp.get("matrix_key")
+            if not key:
+                continue
+            title     = ALLOCATION_MATRIX.get(key, {}).get("title", "")
+            full_name = ALLOCATION_MATRIX.get(key, {}).get("full_name", "")
+            if title:
+                dm = (_best_qbo_match(title, qbo_departments, "Name")
+                      or _best_qbo_match(title, qbo_departments, "FullyQualifiedName"))
+                if dm:
+                    department_map_p[full_name] = dm["Id"]
+                    department_map_p[title]      = dm["Id"]
+
+        emp_payloads, payload_warns = _build_qbo_expense_payloads(
+            period,
+            bank_account_id=bank_match["Id"],
+            vendor_id=vendor_match["Id"],
+            dental_vendor_id=dental_vendor_match["Id"] if dental_vendor_match else None,
+            expense_account_id=account_match["Id"],
+            tax_expense_account_id=tax_exp_match["Id"] if tax_exp_match else "MISSING",
+            health_expense_account_id=health_exp_match["Id"] if health_exp_match else "MISSING",
+            dental_expense_account_id=dental_exp_match["Id"] if dental_exp_match else "MISSING",
+            class_map=class_map_p,
+            customer_map=customer_map_p,
+            tax_liability_id=tax_match["Id"] if tax_match else None,
+            health_liability_id=health_match["Id"] if health_match else None,
+            department_map=department_map_p,
+        )
+        all_warnings.extend(payload_warns)
+
+        for ep in emp_payloads:
+            try:
+                result = await qbo.create_purchase(ep["payload"])
+                txn = result.get("Purchase", {})
+                txn_id = txn.get("Id")
+                all_created.append({
+                    "period":        period["period"],
+                    "employee_name": ep["employee_name"],
+                    "expense_type":  ep["expense_type"],
+                    "expense_id":    txn_id,
+                    "doc_number":    txn.get("DocNumber"),
+                    "total":         txn.get("TotalAmt"),
+                    "qbo_link":      f"https://app.qbo.intuit.com/app/expense?txnId={txn_id}",
+                })
+            except Exception as e:
+                all_post_errors.append(
+                    f"{period['period']} / {ep['employee_name']} / {ep['expense_type']}: {e}"
+                )
+
+    return {
+        "dry_run":       False,
+        "date_range":    {"from": date_from, "to": date_to},
+        "voided": {
+            "count":  len(voided),
+            "items":  voided,
+            "errors": void_errors,
+        },
+        "reposted": {
+            "count":       len(all_created),
+            "items":       all_created,
+            "errors":      all_post_errors,
+            "total_posted": round(sum(c.get("total") or 0 for c in all_created), 2),
+        },
+        "warnings":      all_warnings,
+        "budget_status": budget_status,
+        "summary": (
+            f"Voided {len(voided)} expenses, re-posted {len(all_created)} "
+            f"across {len(periods_in_range)} periods."
+        ),
+    }
