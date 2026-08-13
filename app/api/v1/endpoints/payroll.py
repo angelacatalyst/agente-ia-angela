@@ -43,20 +43,14 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "3010":             0.72,
             "Community Asset":  0.20,
         },
-        # Pool 1: WELLS FARGO earmarked for 3010 only
-        # Pool 2: B3 first → FIRST CITIZEN second → for Fundraising + Community Asset
+        # B3 Living Cities 2026 ($12,500) → First Citizen Bank ($20,000) → 3010 Predevelopment Grant
         "grant_rules": [
             {
-                "pool_classes": ["3010"],
+                "pool_classes": ["Fundraising", "3010", "Community Asset"],
                 "waterfall": [
-                    {"name": "WELLS FARGO", "annual_budget": 83886.94},
-                ],
-            },
-            {
-                "pool_classes": ["Fundraising", "Community Asset"],
-                "waterfall": [
-                    {"name": "B3",           "annual_budget": 12500.00},
-                    {"name": "FIRST CITIZEN","annual_budget": 20000.00},
+                    {"name": "B3 Living Cities 2026",     "annual_budget": 12500.00},
+                    {"name": "First Citizen Bank",         "annual_budget": 20000.00},
+                    {"name": "3010 Predevelopment Grant",  "annual_budget": 500000.00},
                 ],
             },
         ],
@@ -77,23 +71,18 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.05,
             "Festival del Platano": 0.05,
         },
-        # WELLS FARGO earmarked for 3010; MHFA covers everything else (waterfall)
+        # 3C MHA 25-26 Q1 ($30k) → 3C MHA 25-26 Q2 ($25k) → MHFA 2026-2027 Q4-26 ($12.5k, after 3C $25k exhausted) → 3010 Predevelopment
         "grant_rules": [
             {
-                "pool_classes": ["3010"],
-                "waterfall": [
-                    {"name": "WELLS FARGO", "annual_budget": 14731.92},
-                ],
-            },
-            {
                 "pool_classes": [
-                    "Fundraising", "Operations", "Community Asset",
+                    "Fundraising", "Operations", "3010", "Community Asset",
                     "ILB", "Smithsonian", "Festival del Platano",
                 ],
                 "waterfall": [
-                    {"name": "MHFA (1)", "annual_budget": 25000.00},
-                    {"name": "MHFA (2)", "annual_budget": 30000.00},
-                    {"name": "MHFA (3)", "annual_budget": 25000.00},
+                    {"name": "3C MHA 25-26 Q1",          "annual_budget": 30000.00},
+                    {"name": "3C MHA 25-26 Q2",          "annual_budget": 25000.00},
+                    {"name": "MHFA 2026-2027",            "annual_budget": 12500.00},
+                    {"name": "3010 Predevelopment Grant", "annual_budget": 500000.00},
                 ],
             },
         ],
@@ -105,8 +94,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
         "title": "Director of Impact",
         "gusto_last": "Arguelles",
         "gusto_first": "Meysa",
-        # ── EMPLOYEE allocation (Jan–Jun, appears in Gusto at $3,333.33/period) ──
-        # 6 classes, covered by CITI until exhausted → PENDING
+        # ── EMPLOYEE allocation (Jan–Jun) — Citi Community Progress Grant 2024-2026
         "classes": {
             "Operations":   0.10,
             "Fundraising":  0.10,
@@ -122,7 +110,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "La Oficina", "Negocios", "Bus C",
                 ],
                 "waterfall": [
-                    {"name": "CITI", "annual_budget": 33377.05},
+                    {"name": "Citi Community Progress Grant", "annual_budget": 200000.00},
                 ],
             },
         ],
@@ -162,7 +150,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.20,
             "Festival del Platano": 0.20,
         },
-        # CITY OF MIAMI covers all up to $56,000 → TRUIST covers the rest
+        # City of Miami District 1 - MFE Funds $200,000 covers all classes
         "grant_rules": [
             {
                 "pool_classes": [
@@ -170,8 +158,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "Capital Readiness", "Smithsonian", "Festival del Platano",
                 ],
                 "waterfall": [
-                    {"name": "CITY OF MIAMI", "annual_budget": 56000.00},
-                    {"name": "TRUIST",         "annual_budget": 11590.00},
+                    {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
                 ],
             },
         ],
@@ -191,7 +178,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "CPA":                0.15,
             "Tradicion en Accion": 0.20,
         },
-        # TRUIST covers all until exhausted → PENDING
+        # Truist Foundation $100,000 Q1 2026 covers all classes
         "grant_rules": [
             {
                 "pool_classes": [
@@ -199,7 +186,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "ILB", "CPA", "Tradicion en Accion",
                 ],
                 "waterfall": [
-                    {"name": "TRUIST", "annual_budget": 33631.42},
+                    {"name": "Truist Foundation", "annual_budget": 100000.00},
                 ],
             },
         ],
