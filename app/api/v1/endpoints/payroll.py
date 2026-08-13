@@ -618,21 +618,25 @@ def _best_qbo_match(
 ) -> dict | None:
     """Fuzzy-match *target* against a list of QBO entities."""
     tn = _normalize_name(target)
+    if not tn:
+        return None
     # 1. exact
     for item in items:
-        if _normalize_name(item.get(name_key, "")) == tn:
+        cn = _normalize_name(item.get(name_key) or "")
+        if cn and cn == tn:
             return item
-    # 2. one string contains the other
+    # 2. one string contains the other — skip empty candidates to avoid
+    #    false positives (empty string is always a substring in Python)
     for item in items:
-        cn = _normalize_name(item.get(name_key, ""))
-        if cn in tn or tn in cn:
+        cn = _normalize_name(item.get(name_key) or "")
+        if cn and (cn in tn or tn in cn):
             return item
-    # 3. all significant words present
+    # 3. all significant words present in the candidate
     words = [w for w in tn.split() if len(w) > 2]
     if words:
         for item in items:
-            cn = _normalize_name(item.get(name_key, ""))
-            if all(w in cn for w in words):
+            cn = _normalize_name(item.get(name_key) or "")
+            if cn and all(w in cn for w in words):
                 return item
     return None
 
