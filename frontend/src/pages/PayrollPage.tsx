@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
+import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
 import type {
   PayrollPeriod, PayrollMatrixResponse,
@@ -42,6 +43,7 @@ const fmt = (n: number) =>
 
 // ─────────────────────────────────────────────────────────────────────────────
 export function PayrollPage() {
+  const { selectedRealmId, companies: sidebarCompanies } = useAppStore()
   const [tab, setTab] = useState<Tab>('calculator')
 
   // ── Void-and-repost state ─────────────────────────────────────────────────
@@ -119,7 +121,8 @@ export function PayrollPage() {
   // ── QBO post state ────────────────────────────────────────────────────────
   const [qboModalOpen, setQboModalOpen] = useState(false)
   const [qboCompanies, setQboCompanies] = useState<QBOCompany[]>([])
-  const [qboRealm, setQboRealm] = useState('')
+  // Pre-populate from sidebar selection so the button is never stuck disabled
+  const [qboRealm, setQboRealm] = useState(() => selectedRealmId || '')
   const [qboVendor, setQboVendor] = useState('Gusto')
   const [qboAccount, setQboAccount] = useState('Salaries & Wages')
   const [qboBankAccount, setQboBankAccount] = useState('Payroll')
@@ -140,13 +143,17 @@ export function PayrollPage() {
     setQboPreview(null)
     setQboPostResult(null)
     setQboError(null)
-    if (qboCompanies.length === 0) {
-      try {
-        const companies = await api.integrations.qboCompanies()
-        setQboCompanies(companies)
-        if (companies.length > 0 && !qboRealm) setQboRealm(companies[0].realm_id)
-      } catch { /* silent */ }
+    // Use sidebar companies as immediate fallback — no waiting for API
+    if (qboCompanies.length === 0 && sidebarCompanies.length > 0) {
+      setQboCompanies(sidebarCompanies)
+      if (!qboRealm && selectedRealmId) setQboRealm(selectedRealmId)
     }
+    // Also fetch fresh list in background
+    try {
+      const companies = await api.integrations.qboCompanies()
+      setQboCompanies(companies)
+      if (companies.length > 0 && !qboRealm) setQboRealm(companies[0].realm_id)
+    } catch { /* silent — sidebar fallback already applied */ }
   }
 
   const qboOpts = () => ({
@@ -162,7 +169,14 @@ export function PayrollPage() {
   })
 
   const runQboPreview = async () => {
-    if (!fileRef.current?.files?.[0] || !qboRealm) return
+    if (!fileRef.current?.files?.[0]) {
+      setQboError('No Gusto file found. Please upload the file in the Calculator tab first, then click Post to QBO.')
+      return
+    }
+    if (!qboRealm) {
+      setQboError('Please select a QBO company.')
+      return
+    }
     setQboPreviewLoading(true)
     setQboPreview(null)
     setQboError(null)
@@ -179,7 +193,14 @@ export function PayrollPage() {
   }
 
   const confirmQboPost = async () => {
-    if (!fileRef.current?.files?.[0] || !qboRealm) return
+    if (!fileRef.current?.files?.[0]) {
+      setQboError('No Gusto file found. Please upload the file in the Calculator tab first.')
+      return
+    }
+    if (!qboRealm) {
+      setQboError('Please select a QBO company.')
+      return
+    }
     setQboPosting(true)
     setQboError(null)
     try {
