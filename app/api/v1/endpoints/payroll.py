@@ -1302,8 +1302,9 @@ async def post_payroll_to_qbo(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /payroll/void-and-repost
-# Voids all agent-created Expenses (DocNumber starts with "PR-") in a date
-# range, then re-posts them from a Gusto file using the current ALLOCATION_MATRIX.
+# Voids all payroll Expenses in a date range — both agent-created (PR-* prefix)
+# AND manually-entered (vendor = Gusto or The Guardian) — then re-posts them
+# from a Gusto file using the current ALLOCATION_MATRIX with correct departments.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/void-and-repost")
@@ -1325,12 +1326,14 @@ async def void_and_repost_historical(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Void all agent payroll Expenses (DocNumber starts 'PR-') in the date range,
+    Void all payroll Expenses in the date range — both agent-created (DocNumber
+    starts with 'PR-') AND manually-entered (vendor = Gusto or The Guardian) —
     then re-post every pay period in the Gusto file that falls within that range
-    using the current ALLOCATION_MATRIX percentages.
+    using the current ALLOCATION_MATRIX percentages and correct QBO departments.
 
     Safe workflow:
       1. Run with dry_run=true → review what will be voided and what will be re-posted.
+         The response shows each expense tagged as 'agent' or 'manual'.
       2. Run with dry_run=false → void old entries, post corrected ones.
     """
     # ── 1. Parse Gusto file ───────────────────────────────────────────────────
@@ -1368,25 +1371,36 @@ async def void_and_repost_historical(
     if not qbo:
         raise HTTPException(401, f"No QBO connection for realm {realm_id}.")
 
-    # ── 3. Find existing agent payroll Expenses ───────────────────────────────
+    # ── 3. Find existing payroll Expenses (agent-created AND manual) ─────────
     try:
         all_purchases = await qbo.get_purchases_by_date(date_from, date_to)
     except Exception as e:
         raise HTTPException(502, f"Error fetching QBO purchases: {e}")
 
-    # Agent expenses always have DocNumber starting with "PR-"
-    agent_expenses = [
-        p for p in all_purchases
-        if (p.get("DocNumber") or "").startswith("PR-")
-    ]
+    # Payroll vendors used for both agent-posted and manually-entered entries:
+    #   Gusto  → 6110 Salaries & Wages, 6130 Payroll Taxes, 6155 Health Benefits
+    #   The Guardian → 6152 Dental & Vision
+    _PAYROLL_VENDOR_NAMES = {"gusto", "the guardian"}
+
+    def _is_payroll_expense(p: dict) -> bool:
+        # Agent-created: DocNumber starts with "PR-"
+        if (p.get("DocNumber") or "").startswith("PR-"):
+            return True
+        # Manually-entered: vendor is Gusto or The Guardian
+        vendor_name = (p.get("EntityRef", {}).get("name", "") or "").lower().strip()
+        return vendor_name in _PAYROLL_VENDOR_NAMES
+
+    agent_expenses = [p for p in all_purchases if _is_payroll_expense(p)]
 
     void_preview = [
         {
-            "id":         p["Id"],
-            "doc_number": p.get("DocNumber"),
-            "date":       p.get("TxnDate"),
-            "amount":     p.get("TotalAmt"),
+            "id":           p["Id"],
+            "doc_number":   p.get("DocNumber") or "(manual — no DocNumber)",
+            "date":         p.get("TxnDate"),
+            "amount":       p.get("TotalAmt"),
+            "vendor":       (p.get("EntityRef", {}).get("name", "")),
             "private_note": p.get("PrivateNote", ""),
+            "source":       "agent" if (p.get("DocNumber") or "").startswith("PR-") else "manual",
         }
         for p in agent_expenses
     ]
@@ -1404,12 +1418,16 @@ async def void_and_repost_historical(
                 ],
                 "period_total_cost": period["period_total_cost"],
             })
+        manual_count = sum(1 for v in void_preview if v["source"] == "manual")
+        agent_count  = sum(1 for v in void_preview if v["source"] == "agent")
         return {
             "dry_run": True,
             "date_range": {"from": date_from, "to": date_to},
             "to_void": {
-                "count":    len(agent_expenses),
-                "expenses": void_preview,
+                "count":        len(agent_expenses),
+                "agent_count":  agent_count,
+                "manual_count": manual_count,
+                "expenses":     void_preview,
             },
             "to_repost": {
                 "period_count": len(periods_in_range),
@@ -1417,8 +1435,10 @@ async def void_and_repost_historical(
             },
             "message": (
                 f"Will void {len(agent_expenses)} existing payroll expenses "
+                f"({agent_count} agent-created with PR-* prefix, "
+                f"{manual_count} manually entered via Gusto/The Guardian) "
                 f"and re-post {len(periods_in_range)} periods "
-                f"with current allocation percentages. "
+                f"with current allocation percentages and correct departments. "
                 f"Set dry_run=false to execute."
             ),
         }

@@ -17,6 +17,7 @@ const navItems = [
   { to: '/audit',        labelKey: 'nav.audit',        icon: Search },
   { to: '/transactions', labelKey: 'nav.transactions', icon: Tag },
   { to: '/bank-rec',     labelKey: 'nav.bank_rec',     icon: Landmark },
+  { to: '/bookkeeping',  labelKey: 'nav.bookkeeping',  icon: Tag },
   { to: '/assessment',   labelKey: 'nav.assessment',   icon: ClipboardCheck },
   { to: '/payroll',      labelKey: 'nav.payroll',      icon: Users },
   { to: '/projects',     labelKey: 'nav.projects',     icon: FolderOpen },

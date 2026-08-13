@@ -18,8 +18,8 @@ env/
 
 # Node / Frontend
 node_modules/
-frontend/dist/
 frontend/.vite/
+# frontend/dist/ is committed so Render can serve it without a separate build step
 *.local
 
 # Build artifacts

@@ -538,6 +538,167 @@ export function PayrollPage() {
                 </div>
               </div>
             )}
+
+            {/* ── Void & Re-post Historical Panel ──────────────────────── */}
+            <details
+              className="card overflow-hidden"
+              onToggle={(e) => { if ((e.target as HTMLDetailsElement).open) loadFixCompanies() }}
+            >
+              <summary className="flex items-center gap-2 px-5 py-3.5 cursor-pointer select-none hover:bg-surface-100 transition-colors">
+                <AlertTriangle size={14} className="text-amber-500 shrink-0" />
+                <span className="text-sm font-semibold text-surface-800">
+                  Corregir nóminas históricas — Void &amp; Re-post
+                </span>
+                <span className="ml-auto text-[11px] text-surface-400">Enero – Julio 2025</span>
+              </summary>
+
+              <div className="border-t border-surface-200 px-5 py-4 space-y-4">
+                <p className="text-xs text-surface-500">
+                  Voidea los Expenses de nómina existentes en QBO — tanto los del agente (<code className="bg-surface-100 px-1 rounded">PR-*</code>) como los ingresados manualmente (vendor Gusto / The Guardian) — en el rango de fechas y los re-postea con los porcentajes actuales del ALLOCATION_MATRIX y los departamentos correctos.
+                  Usa <strong>Vista previa</strong> primero para confirmar qué se va a anular y re-postear.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Company */}
+                  <div className="col-span-2">
+                    <label className="block text-xs font-medium text-surface-600 mb-1">Empresa QBO</label>
+                    <select className="input" value={fixRealm} onChange={e => setFixRealm(e.target.value)}>
+                      {fixCompanies.length === 0
+                        ? <option value="">Cargando…</option>
+                        : fixCompanies.map(c => (
+                            <option key={c.realm_id} value={c.realm_id}>{c.company_name}</option>
+                          ))
+                      }
+                    </select>
+                  </div>
+
+                  {/* Date range */}
+                  <div>
+                    <label className="block text-xs font-medium text-surface-600 mb-1">Desde</label>
+                    <input type="date" className="input" value={fixDateFrom}
+                      onChange={e => setFixDateFrom(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-surface-600 mb-1">Hasta</label>
+                    <input type="date" className="input" value={fixDateTo}
+                      onChange={e => setFixDateTo(e.target.value)} />
+                  </div>
+
+                  {/* Gusto file */}
+                  <div className="col-span-2">
+                    <label className="block text-xs font-medium text-surface-600 mb-1">
+                      Archivo Gusto (.xlsx) — todos los períodos enero-julio
+                    </label>
+                    <div
+                      onClick={() => fixFileRef.current?.click()}
+                      className="border border-dashed border-surface-300 rounded-lg px-4 py-3 text-center cursor-pointer hover:border-primary-400 hover:bg-primary-50 transition-all"
+                    >
+                      <Upload size={14} className="mx-auto text-surface-400 mb-1" />
+                      <p className="text-xs text-surface-500">
+                        {fixFileName ?? 'Clic para subir el archivo Gusto'}
+                      </p>
+                    </div>
+                    <input
+                      ref={fixFileRef}
+                      type="file"
+                      accept=".xlsx"
+                      className="hidden"
+                      onChange={e => setFixFileName(e.target.files?.[0]?.name ?? null)}
+                    />
+                  </div>
+                </div>
+
+                {/* Dry run toggle */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={fixDryRun}
+                    onChange={e => setFixDryRun(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span className="text-xs font-medium text-surface-700">
+                    Vista previa (dry run) — sin cambios en QBO
+                  </span>
+                </label>
+
+                {/* Error */}
+                {fixError && (
+                  <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2.5">
+                    <AlertCircle size={13} className="text-red-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-red-700">{fixError}</p>
+                  </div>
+                )}
+
+                {/* Result preview */}
+                {fixResult && (
+                  <div className={cn(
+                    'rounded-lg border px-4 py-3 text-xs space-y-2',
+                    fixResult.dry_run
+                      ? 'bg-blue-50 border-blue-200 text-blue-800'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  )}>
+                    {fixResult.dry_run ? (
+                      <>
+                        <p className="font-semibold">Vista previa:</p>
+                        <p>🗑️ Se anularán <strong>{fixResult.to_void?.count ?? 0}</strong> expenses
+                          {fixResult.to_void?.agent_count != null && (
+                            <span className="text-blue-600"> ({fixResult.to_void.agent_count} agente + {fixResult.to_void.manual_count} manual)</span>
+                          )}
+                        </p>
+                        <p>✅ Se re-postearán <strong>{fixResult.to_repost?.period_count ?? 0}</strong> períodos con los % actuales</p>
+                        {fixResult.to_void?.expenses?.length > 0 && (
+                          <details className="mt-1">
+                            <summary className="cursor-pointer font-medium">Ver expenses a anular</summary>
+                            <div className="mt-1 space-y-0.5 max-h-48 overflow-y-auto">
+                              {fixResult.to_void.expenses.map((e: any, i: number) => (
+                                <div key={i} className="font-mono text-[10px] flex items-center gap-2">
+                                  <span className={cn('rounded-full px-1.5 py-0.5 text-[9px] font-semibold',
+                                    e.source === 'agent' ? 'bg-primary-100 text-primary-700' : 'bg-amber-100 text-amber-700'
+                                  )}>{e.source}</span>
+                                  {e.doc_number} · {e.date} · ${e.amount}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                        <p className="text-blue-600 mt-1">
+                          Desmarca "Vista previa" y ejecuta de nuevo para aplicar los cambios.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-semibold">{fixResult.summary}</p>
+                        <p>🗑️ Anulados: <strong>{fixResult.voided?.count}</strong>
+                          {fixResult.voided?.errors?.length > 0 &&
+                            <span className="text-red-600 ml-1">({fixResult.voided.errors.length} errores)</span>}
+                        </p>
+                        <p>✅ Re-posteados: <strong>{fixResult.reposted?.count}</strong> — Total: <strong>${fixResult.reposted?.total_posted?.toLocaleString()}</strong></p>
+                        {fixResult.reposted?.errors?.length > 0 && (
+                          <p className="text-red-600">⚠️ {fixResult.reposted.errors.length} errores al re-postear</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  onClick={runFixHistorical}
+                  disabled={fixLoading || !fixFileRef.current?.files?.[0] || !fixRealm}
+                  className={cn(
+                    'btn-primary w-full justify-center',
+                    !fixDryRun && 'bg-amber-600 hover:bg-amber-700 border-amber-700',
+                  )}
+                >
+                  {fixLoading ? (
+                    <><Loader2 size={13} className="animate-spin" /> Procesando…</>
+                  ) : fixDryRun ? (
+                    <><Eye size={13} /> Vista previa</>
+                  ) : (
+                    <><ShieldCheck size={13} /> Anular y Re-postear en QBO</>
+                  )}
+                </button>
+              </div>
+            </details>
           </div>
         )}
 
@@ -1181,164 +1342,6 @@ export function PayrollPage() {
         </div>
       )}
 
-      {/* ── Void & Re-post Historical Panel ─────────────────────────────── */}
-      {tab === 'calculator' && (
-        <div className="px-6 pb-6">
-          <details
-            className="card overflow-hidden"
-            onToggle={(e) => { if ((e.target as HTMLDetailsElement).open) loadFixCompanies() }}
-          >
-            <summary className="flex items-center gap-2 px-5 py-3.5 cursor-pointer select-none hover:bg-surface-100 transition-colors">
-              <AlertTriangle size={14} className="text-amber-500 shrink-0" />
-              <span className="text-sm font-semibold text-surface-800">
-                Corregir nóminas históricas — Void &amp; Re-post
-              </span>
-              <span className="ml-auto text-[11px] text-surface-400">Enero – Julio 2025</span>
-            </summary>
-
-            <div className="border-t border-surface-200 px-5 py-4 space-y-4">
-              <p className="text-xs text-surface-500">
-                Voidea los Expenses de nómina existentes en QBO (DocNumber <code className="bg-surface-100 px-1 rounded">PR-*</code>)
-                en el rango de fechas y los re-postea con los porcentajes actuales del ALLOCATION_MATRIX.
-                Usa <strong>Vista previa</strong> primero para confirmar qué se va a anular y re-postear.
-              </p>
-
-              <div className="grid grid-cols-2 gap-3">
-                {/* Company */}
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-surface-600 mb-1">Empresa QBO</label>
-                  <select className="input" value={fixRealm} onChange={e => setFixRealm(e.target.value)}>
-                    {fixCompanies.length === 0
-                      ? <option value="">Cargando…</option>
-                      : fixCompanies.map(c => (
-                          <option key={c.realm_id} value={c.realm_id}>{c.company_name}</option>
-                        ))
-                    }
-                  </select>
-                </div>
-
-                {/* Date range */}
-                <div>
-                  <label className="block text-xs font-medium text-surface-600 mb-1">Desde</label>
-                  <input type="date" className="input" value={fixDateFrom}
-                    onChange={e => setFixDateFrom(e.target.value)} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-surface-600 mb-1">Hasta</label>
-                  <input type="date" className="input" value={fixDateTo}
-                    onChange={e => setFixDateTo(e.target.value)} />
-                </div>
-
-                {/* Gusto file */}
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-surface-600 mb-1">
-                    Archivo Gusto (.xlsx) — todos los períodos enero-julio
-                  </label>
-                  <div
-                    onClick={() => fixFileRef.current?.click()}
-                    className="border border-dashed border-surface-300 rounded-lg px-4 py-3 text-center cursor-pointer hover:border-primary-400 hover:bg-primary-50 transition-all"
-                  >
-                    <Upload size={14} className="mx-auto text-surface-400 mb-1" />
-                    <p className="text-xs text-surface-500">
-                      {fixFileName ?? 'Clic para subir el archivo Gusto'}
-                    </p>
-                  </div>
-                  <input
-                    ref={fixFileRef}
-                    type="file"
-                    accept=".xlsx"
-                    className="hidden"
-                    onChange={e => setFixFileName(e.target.files?.[0]?.name ?? null)}
-                  />
-                </div>
-              </div>
-
-              {/* Dry run toggle */}
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={fixDryRun}
-                  onChange={e => setFixDryRun(e.target.checked)}
-                  className="rounded"
-                />
-                <span className="text-xs font-medium text-surface-700">
-                  Vista previa (dry run) — sin cambios en QBO
-                </span>
-              </label>
-
-              {/* Error */}
-              {fixError && (
-                <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2.5">
-                  <AlertCircle size={13} className="text-red-500 shrink-0 mt-0.5" />
-                  <p className="text-xs text-red-700">{fixError}</p>
-                </div>
-              )}
-
-              {/* Result preview */}
-              {fixResult && (
-                <div className={cn(
-                  'rounded-lg border px-4 py-3 text-xs space-y-2',
-                  fixResult.dry_run
-                    ? 'bg-blue-50 border-blue-200 text-blue-800'
-                    : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                )}>
-                  {fixResult.dry_run ? (
-                    <>
-                      <p className="font-semibold">Vista previa:</p>
-                      <p>🗑️ Se anularán <strong>{fixResult.to_void?.count ?? 0}</strong> expenses existentes (PR-*)</p>
-                      <p>✅ Se re-postearán <strong>{fixResult.to_repost?.period_count ?? 0}</strong> períodos con los % actuales</p>
-                      {fixResult.to_void?.expenses?.length > 0 && (
-                        <details className="mt-1">
-                          <summary className="cursor-pointer font-medium">Ver expenses a anular</summary>
-                          <div className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
-                            {fixResult.to_void.expenses.map((e: any, i: number) => (
-                              <div key={i} className="font-mono text-[10px]">
-                                {e.doc_number} · {e.date} · ${e.amount}
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                      <p className="text-blue-600 mt-1">
-                        Desmarca "Vista previa" y ejecuta de nuevo para aplicar los cambios.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="font-semibold">{fixResult.summary}</p>
-                      <p>🗑️ Anulados: <strong>{fixResult.voided?.count}</strong>
-                        {fixResult.voided?.errors?.length > 0 &&
-                          <span className="text-red-600 ml-1">({fixResult.voided.errors.length} errores)</span>}
-                      </p>
-                      <p>✅ Re-posteados: <strong>{fixResult.reposted?.count}</strong> — Total: <strong>${fixResult.reposted?.total_posted?.toLocaleString()}</strong></p>
-                      {fixResult.reposted?.errors?.length > 0 && (
-                        <p className="text-red-600">⚠️ {fixResult.reposted.errors.length} errores al re-postear</p>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-
-              <button
-                onClick={runFixHistorical}
-                disabled={fixLoading || !fixFileRef.current?.files?.[0] || !fixRealm}
-                className={cn(
-                  'btn-primary w-full justify-center',
-                  !fixDryRun && 'bg-amber-600 hover:bg-amber-700 border-amber-700',
-                )}
-              >
-                {fixLoading ? (
-                  <><Loader2 size={13} className="animate-spin" /> Procesando…</>
-                ) : fixDryRun ? (
-                  <><Eye size={13} /> Vista previa</>
-                ) : (
-                  <><ShieldCheck size={13} /> Anular y Re-postear en QBO</>
-                )}
-              </button>
-            </div>
-          </details>
-        </div>
-      )}
     </div>
   )
 }

@@ -394,3 +394,39 @@ class QBOClient:
             clauses.append(f"TxnDate <= '{end_date}'")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return await self._query(f"SELECT * FROM Purchase {where} MAXRESULTS 1000")
+
+    async def get_purchase(self, purchase_id: str) -> dict:
+        """Fetch a single Purchase by Id."""
+        return await self._get(f"purchase/{purchase_id}")
+
+    async def update_purchase(self, purchase_id: str, sync_token: str, updates: dict) -> dict:
+        """
+        Sparse-update a QBO Purchase. `updates` is a partial Purchase dict —
+        only the fields present are changed. The full current Purchase must be
+        fetched first (to get SyncToken); pass that SyncToken here.
+        """
+        await self._ensure_token()
+        url = f"{self._base}/purchase"
+        payload = {
+            "Id": purchase_id,
+            "SyncToken": sync_token,
+            "sparse": True,
+            **updates,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url,
+                headers=self._headers(),
+                params=self._params(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_uncategorized_purchases(self) -> list[dict]:
+        """Return purchases with no account or assigned to Uncategorized Expense/Asset."""
+        return await self._query(
+            "SELECT * FROM Purchase WHERE AccountRef.name IN "
+            "('Uncategorized Expense', 'Uncategorized Asset', 'Ask My Accountant') "
+            "MAXRESULTS 500"
+        )

@@ -36,6 +36,13 @@ engine = create_async_engine(
     max_overflow=settings.database_max_overflow,
     echo=not settings.is_production,
     connect_args=_connect_args,
+    # Neon free-tier auto-suspends after 5 min of inactivity.
+    # pool_pre_ping tests the connection before use and transparently
+    # reconnects if Neon woke up with a stale socket.
+    pool_pre_ping=True,
+    # Recycle connections every 4 minutes so the pool never holds a
+    # connection long enough for Neon to suspend it mid-session.
+    pool_recycle=240,
 )
 
 AsyncSessionLocal: sessionmaker[AsyncSession] = sessionmaker(  # type: ignore[assignment]

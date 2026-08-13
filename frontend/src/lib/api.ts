@@ -286,6 +286,19 @@ export const api = {
     },
   },
 
+  bookkeeping: {
+    review: (realmId: string, startDate: string, endDate: string, filter = 'all') =>
+      apiClient.get<BookkeepingReviewResponse>('/bookkeeping/review', {
+        params: { realm_id: realmId, start_date: startDate, end_date: endDate, filter },
+      }).then(r => r.data),
+    aiSuggest: (payload: AISuggestPayload) =>
+      apiClient.post<AISuggestResponse>('/bookkeeping/ai-suggest', payload).then(r => r.data),
+    categorize: (payload: CategorizePayload) =>
+      apiClient.post<CategorizeResult>('/bookkeeping/categorize', payload).then(r => r.data),
+    categorizeBatch: (realmId: string, items: BatchItem[]) =>
+      apiClient.post('/bookkeeping/categorize-batch', { realm_id: realmId, items }).then(r => r.data),
+  },
+
   integrations: {
     qboStatus: (realmId: string) =>
       apiClient.get('/integrations/qbo/status', { params: { realm_id: realmId } }).then(r => r.data),
@@ -558,6 +571,113 @@ export interface PayrollQBOCreatedExpense {
   line_count: number
   qbo_link: string
   warnings: string[]
+}
+
+// ── Bookkeeping types ─────────────────────────────────────────────────────────
+
+export interface BookkeepingLine {
+  id: string
+  amount: number
+  description: string
+  account_id: string | null
+  account: string | null
+  class_id: string | null
+  class: string | null
+  customer_id: string | null
+  customer: string | null
+}
+
+export interface BookkeepingTransaction {
+  id: string
+  sync_token: string
+  date: string
+  doc_number: string | null
+  vendor: string | null
+  vendor_id: string | null
+  total: number
+  memo: string
+  payment_account: string | null
+  lines: BookkeepingLine[]
+  issues: Array<'uncategorized' | 'bank_fee' | 'missing_class' | 'missing_grant'>
+}
+
+export interface BookkeepingReference {
+  accounts: Array<{ id: string; name: string; type: string }>
+  classes: Array<{ id: string; name: string }>
+  customers: Array<{ id: string; name: string }>
+  vendors: Array<{ id: string; name: string }>
+}
+
+export interface BookkeepingReviewResponse {
+  transactions: BookkeepingTransaction[]
+  counts: {
+    total: number
+    uncategorized: number
+    bank_fee: number
+    missing_class: number
+    missing_grant: number
+  }
+  date_range: { from: string; to: string }
+  reference: BookkeepingReference
+}
+
+export interface AISuggestPayload {
+  realm_id: string
+  transaction_id: string
+  vendor?: string
+  memo?: string
+  amount?: number
+  date?: string
+  current_account?: string
+  available_accounts: Array<{ id: string; name: string }>
+  available_classes: Array<{ id: string; name: string }>
+  available_customers: Array<{ id: string; name: string }>
+}
+
+export interface AISuggestion {
+  account_id: string | null
+  account_name: string | null
+  class_id: string | null
+  class_name: string | null
+  customer_id: string | null
+  customer_name: string | null
+  confidence: 'high' | 'medium' | 'low'
+  reasoning: string
+}
+
+export interface AISuggestResponse {
+  transaction_id: string
+  suggestion: AISuggestion
+}
+
+export interface LineUpdate {
+  line_id: string
+  account_id?: string | null
+  class_id?: string | null
+  customer_id?: string | null
+}
+
+export interface CategorizePayload {
+  realm_id: string
+  transaction_id: string
+  sync_token: string
+  line_updates: LineUpdate[]
+  memo?: string
+}
+
+export interface CategorizeResult {
+  success: boolean
+  id: string
+  doc_number: string
+  total: number
+  message: string
+}
+
+export interface BatchItem {
+  transaction_id: string
+  sync_token: string
+  line_updates: LineUpdate[]
+  memo?: string
 }
 
 export interface PayrollQBOPostResult {
