@@ -89,7 +89,7 @@ export function PayrollPage() {
           health_liability_account: 'Payroll Health',
           tax_expense_account: 'Payroll Taxes',
           health_expense_account: 'Health Benefits',
-          dental_expense_account: 'Vision and Dental',
+          dental_expense_account: 'Dental & Vision Plans',
           dental_vendor: 'The Guardian',
         },
       })
@@ -130,7 +130,7 @@ export function PayrollPage() {
   const [qboHealthAccount, setQboHealthAccount] = useState('Payroll Health')
   const [qboTaxExpenseAccount, setQboTaxExpenseAccount] = useState('Payroll Taxes')
   const [qboHealthExpenseAccount, setQboHealthExpenseAccount] = useState('Health Benefits')
-  const [qboDentalExpenseAccount, setQboDentalExpenseAccount] = useState('Vision and Dental')
+  const [qboDentalExpenseAccount, setQboDentalExpenseAccount] = useState('Dental & Vision Plans')
   const [qboDentalVendor, setQboDentalVendor] = useState('The Guardian')
   const [qboPreview, setQboPreview] = useState<PayrollQBOPreviewResponse | null>(null)
   const [qboPreviewLoading, setQboPreviewLoading] = useState(false)

@@ -998,8 +998,8 @@ async def post_payroll_to_qbo(
         description="Expense account for health insurance (e.g. '6155')",
     ),
     dental_expense_account: str = Query(
-        "Vision and Dental",
-        description="Expense account for dental/vision (e.g. '6152')",
+        "Dental & Vision Plans",
+        description="Expense account for dental/vision (e.g. '6152 Dental & Vision Plans')",
     ),
     dental_vendor: str = Query(
         "The Guardian",
@@ -1072,7 +1072,8 @@ async def post_payroll_to_qbo(
     # ── 4. Match names → QBO IDs (also check FullyQualifiedName for sub-customers) ──
     def _match_vendor(name: str) -> dict | None:
         return (
-            _best_qbo_match(name, qbo_vendors, "DisplayName")
+            _best_qbo_match(name, qbo_vendors, "Name")
+            or _best_qbo_match(name, qbo_vendors, "DisplayName")
             or _best_qbo_match(name, qbo_vendors, "CompanyName")
         )
 
