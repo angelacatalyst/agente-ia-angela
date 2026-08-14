@@ -731,16 +731,16 @@ def _make_allocation_lines(
         if amt == 0:
             continue
         if gname == "PENDING":
-            cid = customer_map.get("PENDING")
-            customer_ref = {"value": cid} if cid else None
-            if not cid:
-                warnings.append(f"PENDING — 'Pending Allocations Grant' not found in QBO, posted without customer.")
+            cid = customer_map.get("PENDING") or ""
         else:
-            cid = customer_map.get(gname)
+            cid = customer_map.get(gname) or ""
             if not cid:
-                warnings.append(f"Grant '{gname}' not found in QBO — line skipped.")
-                continue
-            customer_ref = {"value": cid}
+                # Grant customer not found in QBO → fall back to Pending Allocations Grant
+                warnings.append(f"Grant '{gname}' not found in QBO — posting to 'Pending Allocations Grant'.")
+                cid = customer_map.get("PENDING") or ""
+        if not cid:
+            warnings.append(f"'Pending Allocations Grant' also not found in QBO — line posted without customer.")
+        customer_ref = {"value": cid} if cid else None
         class_id = class_map.get(cls)
         detail: dict = {"AccountRef": {"value": account_id}}
         if class_id:
@@ -1131,10 +1131,10 @@ async def post_payroll_to_qbo(
         m = _match_customer(g)
         customer_map[g] = m["Id"] if m else ""
 
-    # Always resolve the "Pending Allocations Grant" customer if any PENDING lines exist
-    if has_pending:
-        m = _match_customer(PENDING_GRANT_NAME)
-        customer_map["PENDING"] = m["Id"] if m else ""
+    # Always resolve "Pending Allocations Grant" — used as fallback whenever
+    # a grant is exhausted OR a grant customer is not found in QBO.
+    m = _match_customer(PENDING_GRANT_NAME)
+    customer_map["PENDING"] = m["Id"] if m else ""
 
     lookups: dict = {
         "vendor": {
