@@ -86,7 +86,7 @@ export function PayrollPage() {
           payroll_vendor: 'Gusto',
           bank_account: 'Payroll',
           tax_liability_account: 'Payroll Tax',
-          health_liability_account: 'Payroll Health',
+          health_liability_account: 'Dental/Vision Liability',
           tax_expense_account: 'Payroll Taxes',
           health_expense_account: 'Health Benefits',
           dental_expense_account: 'Dental & Vision Plans',
@@ -127,7 +127,7 @@ export function PayrollPage() {
   const [qboAccount, setQboAccount] = useState('Salaries & Wages')
   const [qboBankAccount, setQboBankAccount] = useState('Payroll')
   const [qboTaxAccount, setQboTaxAccount] = useState('Payroll Tax')
-  const [qboHealthAccount, setQboHealthAccount] = useState('Payroll Health')
+  const [qboHealthAccount, setQboHealthAccount] = useState('Dental/Vision Liability')
   const [qboTaxExpenseAccount, setQboTaxExpenseAccount] = useState('Payroll Taxes')
   const [qboHealthExpenseAccount, setQboHealthExpenseAccount] = useState('Health Benefits')
   const [qboDentalExpenseAccount, setQboDentalExpenseAccount] = useState('Dental & Vision Plans')

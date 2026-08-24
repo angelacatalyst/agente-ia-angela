@@ -986,8 +986,8 @@ async def post_payroll_to_qbo(
         description="Payroll tax liability account (negative line). Leave blank to omit.",
     ),
     health_liability_account: str = Query(
-        "Payroll Health",
-        description="Health/dental liability account (negative line). Leave blank to omit.",
+        "Dental/Vision Liability",
+        description="Dental/vision liability account 2136 (negative line). Leave blank to omit.",
     ),
     tax_expense_account: str = Query(
         "Payroll Taxes",
