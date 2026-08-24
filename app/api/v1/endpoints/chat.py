@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import FinanceOrchestrator
+from app.company_config import load_company_profile
 from app.core.dependencies import DbDep, SettingsDep, get_db, get_qbo_client_for_realm
 from app.core.logging import get_logger
 from app.core.security import verify_api_key
@@ -56,21 +57,27 @@ async def chat(
     from datetime import datetime, timezone
     orch = get_orchestrator()
 
-    # Load QBO tools from DB if realm_id provided
     qbo_tools = []
+    context = dict(request.context or {})
     if request.qbo_realm_id:
+        context["qbo_realm_id"] = request.qbo_realm_id
         qbo_client = await get_qbo_client_for_realm(request.qbo_realm_id, db)
         if qbo_client:
             qbo_tools = build_qbo_tools(qbo_client)
-            orch.update_qbo_tools(qbo_tools)
+        try:
+            profile = await load_company_profile(db, request.qbo_realm_id)
+            context["payroll_accounts"] = profile.get("payroll_accounts")
+        except Exception:
+            logger.warning("Could not load company profile", realm_id=request.qbo_realm_id)
 
     try:
-        result = await orch.invoke(
-            user_message=request.message,
-            conversation_id=str(request.conversation_id) if request.conversation_id else None,
-            qbo_realm_id=request.qbo_realm_id,
-            context=request.context,
-        )
+        async with orch.bind_qbo_tools(qbo_tools):
+            result = await orch.invoke(
+                user_message=request.message,
+                conversation_id=str(request.conversation_id) if request.conversation_id else None,
+                qbo_realm_id=request.qbo_realm_id,
+                context=context,
+            )
     except Exception as exc:
         logger.error("Chat agent error", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
@@ -101,21 +108,29 @@ async def chat_stream(
     """
     orch = get_orchestrator()
 
-    # Load QBO tools from DB if realm_id provided
+    qbo_tools = []
+    context = dict(request.context or {})
     if request.qbo_realm_id:
+        context["qbo_realm_id"] = request.qbo_realm_id
         qbo_client = await get_qbo_client_for_realm(request.qbo_realm_id, db)
         if qbo_client:
-            orch.update_qbo_tools(build_qbo_tools(qbo_client))
+            qbo_tools = build_qbo_tools(qbo_client)
+        try:
+            profile = await load_company_profile(db, request.qbo_realm_id)
+            context["payroll_accounts"] = profile.get("payroll_accounts")
+        except Exception:
+            logger.warning("Could not load company profile", realm_id=request.qbo_realm_id)
 
     async def event_stream() -> AsyncIterator[str]:
         try:
-            async for chunk in orch.stream(
-                user_message=request.message,
-                conversation_id=str(request.conversation_id) if request.conversation_id else None,
-                qbo_realm_id=request.qbo_realm_id,
-                context=request.context,
-            ):
-                yield chunk
+            async with orch.bind_qbo_tools(qbo_tools):
+                async for chunk in orch.stream(
+                    user_message=request.message,
+                    conversation_id=str(request.conversation_id) if request.conversation_id else None,
+                    qbo_realm_id=request.qbo_realm_id,
+                    context=context,
+                ):
+                    yield chunk
         except Exception as exc:
             import json
             logger.error("Streaming error", error=str(exc))

@@ -12,12 +12,15 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 import openpyxl
 
+from app.company_config import load_company_profile, resolve_payroll_accounts
 from app.core.dependencies import get_db, get_qbo_client_for_realm
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
@@ -236,11 +239,41 @@ ALLOCATION_MATRIX: dict[str, dict] = {
     },
 }
 
-# Lookup by (last, first) → matrix key
+# Lookup by (last, first) → matrix key (Allapattah default; overridden per-request)
 _GUSTO_LOOKUP: dict[tuple[str, str], str] = {
     (v["gusto_last"].lower(), v["gusto_first"].lower()): k
     for k, v in ALLOCATION_MATRIX.items()
 }
+
+_matrix_var: ContextVar[dict] = ContextVar("payroll_alloc_matrix")
+
+
+def _active_matrix() -> dict:
+    return _matrix_var.get(ALLOCATION_MATRIX)
+
+
+def _gusto_lookup() -> dict[tuple[str, str], str]:
+    matrix = _active_matrix()
+    if matrix is ALLOCATION_MATRIX:
+        return _GUSTO_LOOKUP
+    return {
+        (v["gusto_last"].lower(), v["gusto_first"].lower()): k
+        for k, v in matrix.items()
+        if v.get("gusto_last") and v.get("gusto_first")
+    }
+
+
+@contextmanager
+def _use_allocation_matrix(matrix: dict | None):
+    """Temporarily use a per-company matrix; None keeps Allapattah defaults."""
+    if not matrix:
+        yield
+        return
+    token = _matrix_var.set(matrix)
+    try:
+        yield
+    finally:
+        _matrix_var.reset(token)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,7 +361,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
     """
     # Initialize cumulative budget remaining per employee per grant
     budget_remaining: dict[str, dict[str, float]] = {}
-    for key, profile in ALLOCATION_MATRIX.items():
+    for key, profile in _active_matrix().items():
         budget_remaining[key] = {}
         for pool in profile.get("grant_rules", []):
             for g in pool["waterfall"]:
@@ -343,7 +376,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
         unmatched = []
 
         for emp in period["employees"]:
-            key = _GUSTO_LOOKUP.get(
+            key = _gusto_lookup().get(
                 (emp["last"].lower(), emp["first"].lower())
             )
             if not key:
@@ -351,7 +384,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
                 enriched_emps.append({**emp, "matrix_key": None, "allocation": None})
                 continue
 
-            profile = ALLOCATION_MATRIX[key]
+            profile = _active_matrix()[key]
             dental = profile.get("dental_vision_employer", 0.0)
             total_cost = emp["gross"] + emp["employer_taxes"] + emp["health_allowance"] + dental
 
@@ -483,7 +516,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             for g in pool["waterfall"]
             for gname in [g["name"]]
         }
-        for key, profile in ALLOCATION_MATRIX.items()
+        for key, profile in _active_matrix().items()
     }
 
     return results, budget_status
@@ -529,7 +562,15 @@ def _build_journal_entry(period_data: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/matrix")
-async def get_matrix() -> dict:
+async def get_matrix(
+    realm_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    matrix = ALLOCATION_MATRIX
+    if realm_id:
+        profile = await load_company_profile(db, realm_id)
+        if profile.get("allocation_matrix"):
+            matrix = profile["allocation_matrix"]
     return {
         "matrix": {
             k: {
@@ -540,9 +581,10 @@ async def get_matrix() -> dict:
                 "contractor":  v.get("contractor"),   # None for most employees
                 "note":        v.get("note"),
             }
-            for k, v in ALLOCATION_MATRIX.items()
+            for k, v in matrix.items()
         },
-        "employee_count": len(ALLOCATION_MATRIX),
+        "employee_count": len(matrix),
+        "source": "company_profile" if matrix is not ALLOCATION_MATRIX else "allapattah_default",
     }
 
 
@@ -551,6 +593,8 @@ async def process_payroll(
     file: UploadFile = File(...),
     period_index: Optional[int] = Query(None),
     include_journal_entry: bool = Query(False),
+    realm_id: str | None = Query(None, description="Optional QBO realm to use that company's allocation matrix"),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "Please upload a .xlsx file from Gusto.")
@@ -564,27 +608,33 @@ async def process_payroll(
     if not raw_periods:
         raise HTTPException(422, "No pay periods found in the uploaded file.")
 
-    enriched, budget_status = _apply_waterfall(raw_periods)
+    custom_matrix = None
+    if realm_id:
+        profile = await load_company_profile(db, realm_id)
+        custom_matrix = profile.get("allocation_matrix") or None
 
-    if period_index is not None:
-        if period_index < 0 or period_index >= len(enriched):
-            raise HTTPException(404, f"Period {period_index} out of range (0–{len(enriched)-1}).")
-        result_periods = [enriched[period_index]]
-    else:
-        result_periods = enriched
+    with _use_allocation_matrix(custom_matrix):
+        enriched, budget_status = _apply_waterfall(raw_periods)
 
-    response: dict = {
-        "total_periods": len(raw_periods),
-        "periods":       result_periods,
-        "budget_status": budget_status,
-    }
+        if period_index is not None:
+            if period_index < 0 or period_index >= len(enriched):
+                raise HTTPException(404, f"Period {period_index} out of range (0–{len(enriched)-1}).")
+            result_periods = [enriched[period_index]]
+        else:
+            result_periods = enriched
 
-    if include_journal_entry:
-        response["journal_entries"] = [
-            _build_journal_entry(p) for p in result_periods
-        ]
+        response: dict = {
+            "total_periods": len(raw_periods),
+            "periods":       result_periods,
+            "budget_status": budget_status,
+        }
 
-    return response
+        if include_journal_entry:
+            response["journal_entries"] = [
+                _build_journal_entry(p) for p in result_periods
+            ]
+
+        return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -655,6 +705,39 @@ def _best_qbo_match(
     return None
 
 
+def _match_qbo_account(name: str, pool: list[dict]) -> dict | None:
+    """
+    Match a QBO account by AcctNum first (when the search starts with digits),
+    then by Name / FullyQualifiedName.
+
+    Prefers account numbers so e.g. "2136 Dental/Vision Liability" resolves to
+    AcctNum 2136 instead of fuzzy-matching "Payroll Health" → 2135 Medical Care.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return None
+
+    num_match = re.match(r"^(\d{3,6})\b", raw)
+    if num_match:
+        acct_num = num_match.group(1)
+        for item in pool:
+            if str(item.get("AcctNum") or "").strip() == acct_num:
+                return item
+        # Strip leading number for name fallback (e.g. "2136 Dental/Vision…")
+        name_only = re.sub(r"^\d{3,6}\s*[-:]?\s*", "", raw).strip()
+        if name_only:
+            return (
+                _best_qbo_match(name_only, pool, "Name")
+                or _best_qbo_match(name_only, pool, "FullyQualifiedName")
+            )
+        return None
+
+    return (
+        _best_qbo_match(raw, pool, "Name")
+        or _best_qbo_match(raw, pool, "FullyQualifiedName")
+    )
+
+
 def _get_expense_lines_for_emp(emp: dict) -> list[dict]:
     """
     Return flat list of {cls, grant, amount} for one employee.
@@ -665,7 +748,7 @@ def _get_expense_lines_for_emp(emp: dict) -> list[dict]:
     if not key or not emp.get("allocation"):
         return rows
 
-    profile = ALLOCATION_MATRIX[key]
+    profile = _active_matrix()[key]
     class_amounts = {
         cls: data["amount"]
         for cls, data in emp["allocation"]["classes"].items()
@@ -986,7 +1069,7 @@ async def post_payroll_to_qbo(
         description="Payroll tax liability account (negative line). Leave blank to omit.",
     ),
     health_liability_account: str = Query(
-        "Dental/Vision Liability",
+        "2136 Dental/Vision Liability",
         description="Dental/vision liability account 2136 (negative line). Leave blank to omit.",
     ),
     tax_expense_account: str = Query(
@@ -1020,6 +1103,33 @@ async def post_payroll_to_qbo(
     Use dry_run=true (default) first to verify QBO name matching,
     then re-submit with dry_run=false to create the Expenses.
     """
+    company_profile = await load_company_profile(db, realm_id)
+    resolved = resolve_payroll_accounts(
+        {
+            "expense_account": expense_account,
+            "payroll_vendor": payroll_vendor,
+            "bank_account": bank_account,
+            "tax_liability_account": tax_liability_account,
+            "health_liability_account": health_liability_account,
+            "tax_expense_account": tax_expense_account,
+            "health_expense_account": health_expense_account,
+            "dental_expense_account": dental_expense_account,
+            "dental_vendor": dental_vendor,
+        },
+        company_profile,
+    )
+    expense_account = resolved["expense_account"]
+    payroll_vendor = resolved["payroll_vendor"]
+    bank_account = resolved["bank_account"]
+    tax_liability_account = resolved["tax_liability_account"]
+    health_liability_account = resolved["health_liability_account"]
+    tax_expense_account = resolved["tax_expense_account"]
+    health_expense_account = resolved["health_expense_account"]
+    dental_expense_account = resolved["dental_expense_account"]
+    dental_vendor = resolved["dental_vendor"]
+    if company_profile.get("allocation_matrix"):
+        _matrix_var.set(company_profile["allocation_matrix"])
+
     # ── 1. Parse + allocate ──────────────────────────────────────────────────
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "Please upload a .xlsx file from Gusto.")
@@ -1078,10 +1188,7 @@ async def post_payroll_to_qbo(
         )
 
     def _match_account(name: str, pool: list[dict]) -> dict | None:
-        return (
-            _best_qbo_match(name, pool, "Name")
-            or _best_qbo_match(name, pool, "FullyQualifiedName")
-        )
+        return _match_qbo_account(name, pool)
 
     def _match_customer(name: str) -> dict | None:
         # Use exact alias if defined — avoids fuzzy mismatch when multiple
@@ -1227,8 +1334,8 @@ async def post_payroll_to_qbo(
         key = emp.get("matrix_key")
         if not key:
             continue
-        title = ALLOCATION_MATRIX.get(key, {}).get("title", "")
-        full_name = ALLOCATION_MATRIX.get(key, {}).get("full_name", "")
+        title = _active_matrix().get(key, {}).get("title", "")
+        full_name = _active_matrix().get(key, {}).get("full_name", "")
         if title:
             dm = _best_qbo_match(title, qbo_departments, "Name") or _best_qbo_match(title, qbo_departments, "FullyQualifiedName")
             if dm:
@@ -1339,7 +1446,7 @@ async def void_and_repost_historical(
     payroll_vendor: str = Query("Gusto"),
     bank_account: str = Query("Payroll"),
     tax_liability_account: str = Query("Payroll Tax"),
-    health_liability_account: str = Query("Payroll Health"),
+    health_liability_account: str = Query("2136 Dental/Vision Liability"),
     tax_expense_account: str = Query("Payroll Taxes"),
     health_expense_account: str = Query("Health Benefits"),
     dental_expense_account: str = Query("Vision and Dental"),
@@ -1358,6 +1465,33 @@ async def void_and_repost_historical(
          The response shows each expense tagged as 'agent' or 'manual'.
       2. Run with dry_run=false → void old entries, post corrected ones.
     """
+    company_profile = await load_company_profile(db, realm_id)
+    resolved = resolve_payroll_accounts(
+        {
+            "expense_account": expense_account,
+            "payroll_vendor": payroll_vendor,
+            "bank_account": bank_account,
+            "tax_liability_account": tax_liability_account,
+            "health_liability_account": health_liability_account,
+            "tax_expense_account": tax_expense_account,
+            "health_expense_account": health_expense_account,
+            "dental_expense_account": dental_expense_account,
+            "dental_vendor": dental_vendor,
+        },
+        company_profile,
+    )
+    expense_account = resolved["expense_account"]
+    payroll_vendor = resolved["payroll_vendor"]
+    bank_account = resolved["bank_account"]
+    tax_liability_account = resolved["tax_liability_account"]
+    health_liability_account = resolved["health_liability_account"]
+    tax_expense_account = resolved["tax_expense_account"]
+    health_expense_account = resolved["health_expense_account"]
+    dental_expense_account = resolved["dental_expense_account"]
+    dental_vendor = resolved["dental_vendor"]
+    if company_profile.get("allocation_matrix"):
+        _matrix_var.set(company_profile["allocation_matrix"])
+
     # ── 1. Parse Gusto file ───────────────────────────────────────────────────
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "Please upload a .xlsx Gusto file.")
@@ -1482,8 +1616,7 @@ async def void_and_repost_historical(
                 or _best_qbo_match(name, qbo_vendors, "CompanyName"))
 
     def _ma(name: str, pool: list[dict]) -> dict | None:
-        return (_best_qbo_match(name, pool, "Name")
-                or _best_qbo_match(name, pool, "FullyQualifiedName"))
+        return _match_qbo_account(name, pool)
 
     def _mc(name: str) -> dict | None:
         return (_best_qbo_match(name, qbo_customers, "DisplayName")
@@ -1562,8 +1695,8 @@ async def void_and_repost_historical(
             key = emp.get("matrix_key")
             if not key:
                 continue
-            title     = ALLOCATION_MATRIX.get(key, {}).get("title", "")
-            full_name = ALLOCATION_MATRIX.get(key, {}).get("full_name", "")
+            title     = _active_matrix().get(key, {}).get("title", "")
+            full_name = _active_matrix().get(key, {}).get("full_name", "")
             if title:
                 dm = (_best_qbo_match(title, qbo_departments, "Name")
                       or _best_qbo_match(title, qbo_departments, "FullyQualifiedName"))

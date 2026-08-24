@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg
 *.egg-info/
-dist/
+/dist/
 build/
 .eggs/
 .venv/
@@ -19,7 +19,9 @@ env/
 # Node / Frontend
 node_modules/
 frontend/.vite/
-# frontend/dist/ is committed so Render can serve it without a separate build step
+# frontend/dist is committed so Render can serve the SPA without a Node build
+!frontend/dist/
+!frontend/dist/**
 *.local
 
 # Build artifacts
@@ -46,6 +48,6 @@ uploads/
 /tmp/
 
 # Distribution
-dist/
+/dist/
 *.tar.gz
 *.zip

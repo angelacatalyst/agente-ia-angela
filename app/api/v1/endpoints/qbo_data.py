@@ -541,3 +541,98 @@ async def get_bank_accounts(
         "total": len(bank_accounts),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get("/bank-accounts/last-reconciliation")
+async def get_last_reconciliation(
+    realm_id: str = Query(..., description="QBO realm/company ID"),
+    account_id: str | None = Query(None, description="Optional QBO Account ID to focus on"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Return the latest bank reconciliation status and statement period hints
+    for one account (or all bank/CC accounts). Does not run AI — live QBO data only.
+    """
+    client = await _get_client(realm_id, db)
+    try:
+        accounts = await client.get_chart_of_accounts()
+    except Exception as e:
+        raise HTTPException(502, f"Error fetching accounts from QBO: {e}")
+
+    def _next_statement_date(last_reconcile: str) -> str:
+        try:
+            from datetime import date
+            import calendar
+            d = date.fromisoformat(last_reconcile)
+            month = d.month + 1 if d.month < 12 else 1
+            year = d.year if d.month < 12 else d.year + 1
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        except Exception:
+            return ""
+
+    def _period_start(last_reconcile: str) -> str:
+        """Day after last reconcile → start of current open statement period."""
+        try:
+            from datetime import date, timedelta
+            d = date.fromisoformat(last_reconcile) + timedelta(days=1)
+            return d.isoformat()
+        except Exception:
+            return ""
+
+    bank_accounts = [
+        a for a in accounts
+        if a.get("AccountType") in ("Bank", "Credit Card") and a.get("Active", True)
+    ]
+
+    if account_id:
+        bank_accounts = [a for a in bank_accounts if str(a.get("Id")) == str(account_id)]
+        if not bank_accounts:
+            raise HTTPException(404, f"Bank/credit card account {account_id} not found")
+
+    results: list[dict] = []
+    for a in bank_accounts:
+        last_rec = a.get("LastReconcileDate", "") or ""
+        next_stmt = _next_statement_date(last_rec)
+        period_start = _period_start(last_rec)
+        entry: dict[str, Any] = {
+            "id": a.get("Id", ""),
+            "name": a.get("Name", ""),
+            "full_name": a.get("FullyQualifiedName", a.get("Name", "")),
+            "account_type": a.get("AccountType", ""),
+            "balance": a.get("CurrentBalance", 0.0),
+            "balance_fmt": f"${a.get('CurrentBalance', 0.0):,.2f}",
+            "last_reconcile_date": last_rec,
+            "statement_period_start": period_start,
+            "next_statement_date": next_stmt,
+            "status": "reconciled" if last_rec else "never_reconciled",
+            "reconciliation_report": None,
+            "report_error": None,
+        }
+
+        # Pull latest ReconciliationDetail from QBO (statement snapshot)
+        if last_rec and a.get("Id"):
+            try:
+                entry["reconciliation_report"] = await client.get_reconciliation_report(
+                    str(a["Id"]),
+                    end_date=last_rec,
+                )
+            except Exception:
+                try:
+                    entry["reconciliation_report"] = await client.get_reconciliation_report(
+                        str(a["Id"])
+                    )
+                except Exception as exc2:
+                    entry["report_error"] = str(exc2)
+
+        results.append(entry)
+
+    results.sort(key=lambda x: x["full_name"])
+
+    focused = results[0] if account_id and results else None
+    return {
+        "accounts": results,
+        "focused": focused,
+        "total": len(results),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }

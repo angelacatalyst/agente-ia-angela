@@ -120,6 +120,23 @@ class QBOToken(Base):
     )
 
 
+class CompanyProfile(Base):
+    """Per-QBO-company account map and optional payroll allocation matrix."""
+
+    __tablename__ = "company_profiles"
+
+    realm_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payroll_accounts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    allocation_matrix: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class AuditLog(Base):
     """Agent action audit trail."""
 

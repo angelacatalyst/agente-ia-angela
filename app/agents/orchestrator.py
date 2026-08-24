@@ -11,7 +11,9 @@ State is persisted to PostgreSQL via LangGraph checkpointing.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_anthropic import ChatAnthropic
@@ -91,6 +93,7 @@ class FinanceOrchestrator:
 
     def __init__(self, qbo_tools: list[BaseTool] | None = None) -> None:
         self._qbo_tools = qbo_tools or []
+        self._qbo_bind_lock = asyncio.Lock()
         self._router_llm = ChatAnthropic(
             model=settings.anthropic_model,
             max_tokens=256,
@@ -175,10 +178,14 @@ class FinanceOrchestrator:
                 if not isinstance(m, SystemMessage)
             ]
 
+            ctx = dict(state.get("context") or {})
+            if state.get("qbo_realm_id"):
+                ctx.setdefault("qbo_realm_id", state["qbo_realm_id"])
+
             result = await agent.run(
                 user_input=content,
                 history=history if history else None,
-                context=state.get("context"),
+                context=ctx,
             )
 
             return {
@@ -251,9 +258,12 @@ class FinanceOrchestrator:
         # Yield module info as first SSE event
         yield f"data: {{\"module\": \"{module}\", \"type\": \"routing\"}}\n\n"
 
-        # Stream from specialist agent
+        # Stream from specialist agent (include realm so tools stay company-scoped)
         agent = self._agents[module]
-        async for chunk in agent.stream(user_message, context=context):
+        stream_ctx = dict(context or {})
+        if qbo_realm_id:
+            stream_ctx.setdefault("qbo_realm_id", qbo_realm_id)
+        async for chunk in agent.stream(user_message, context=stream_ctx):
             if chunk:
                 # SSE format
                 import json
@@ -261,8 +271,16 @@ class FinanceOrchestrator:
 
         yield 'data: {"type": "done"}\n\n'
 
+    @asynccontextmanager
+    async def bind_qbo_tools(self, qbo_tools: list[BaseTool]):
+        """Bind QBO tools for one request so concurrent chats don't mix companies."""
+        async with self._qbo_bind_lock:
+            if qbo_tools:
+                self.update_qbo_tools(qbo_tools)
+            yield
+
     def update_qbo_tools(self, qbo_tools: list[BaseTool]) -> None:
-        """Hot-swap QBO tools (e.g., after OAuth token refresh)."""
+        """Hot-swap QBO tools for the currently selected QBO realm."""
         self._qbo_tools = qbo_tools
         for agent in [
             "qbo_auditor", "grant_compliance", "payment_request",

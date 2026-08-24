@@ -193,16 +193,23 @@ export const api = {
       apiClient.get('/qbo/data/projects/pl', { params: { realm_id: realmId, customer_id: customerId, start_date: startDate, end_date: endDate } }).then(r => r.data),
     bankAccounts: (realmId: string) =>
       apiClient.get<{ accounts: QBOBankAccount[]; total: number; fetched_at: string }>('/qbo/data/bank-accounts', { params: { realm_id: realmId } }).then(r => r.data),
+    lastReconciliation: (realmId: string, accountId?: string) =>
+      apiClient.get<QBOLastReconciliationResponse>('/qbo/data/bank-accounts/last-reconciliation', {
+        params: { realm_id: realmId, ...(accountId ? { account_id: accountId } : {}) },
+      }).then(r => r.data),
   },
 
   payroll: {
-    matrix: () =>
-      apiClient.get<PayrollMatrixResponse>('/payroll/matrix').then(r => r.data),
-    process: (file: File, periodIndex?: number, includeJE = false) => {
+    matrix: (realmId?: string) =>
+      apiClient.get<PayrollMatrixResponse>('/payroll/matrix', {
+        params: realmId ? { realm_id: realmId } : undefined,
+      }).then(r => r.data),
+    process: (file: File, periodIndex?: number, includeJE = false, realmId?: string) => {
       const fd = new FormData()
       fd.append('file', file)
       const params: Record<string, unknown> = { include_journal_entry: includeJE }
       if (periodIndex !== undefined) params.period_index = periodIndex
+      if (realmId) params.realm_id = realmId
       return apiClient.post<PayrollProcessResponse>('/payroll/process', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
         params,
@@ -237,7 +244,7 @@ export const api = {
           payroll_vendor:           opts?.payrollVendor ?? 'Gusto',
           bank_account:             opts?.bankAccount ?? 'Payroll',
           tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
-          health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
+          health_liability_account: opts?.healthLiabilityAccount ?? '2136 Dental/Vision Liability',
           include_pending:          opts?.includePending ?? false,
           tax_expense_account:      opts?.taxExpenseAccount ?? 'Payroll Taxes',
           health_expense_account:   opts?.healthExpenseAccount ?? 'Health Benefits',
@@ -275,7 +282,7 @@ export const api = {
           payroll_vendor:           opts?.payrollVendor ?? 'Gusto',
           bank_account:             opts?.bankAccount ?? 'Payroll',
           tax_liability_account:    opts?.taxLiabilityAccount ?? 'Payroll Tax',
-          health_liability_account: opts?.healthLiabilityAccount ?? 'Payroll Health',
+          health_liability_account: opts?.healthLiabilityAccount ?? '2136 Dental/Vision Liability',
           include_pending:          opts?.includePending ?? false,
           tax_expense_account:      opts?.taxExpenseAccount ?? 'Payroll Taxes',
           health_expense_account:   opts?.healthExpenseAccount ?? 'Health Benefits',
@@ -309,6 +316,16 @@ export const api = {
     qboCompanies: () =>
       apiClient.get<QBOCompany[]>('/integrations/qbo/companies').then(r => r.data),
   },
+
+  companyProfiles: {
+    get: (realmId: string) =>
+      apiClient.get<CompanyProfile>('/company-profiles', { params: { realm_id: realmId } }).then(r => r.data),
+    save: (realmId: string, payrollAccounts: Record<string, string>, companyName?: string) =>
+      apiClient.put<CompanyProfile>('/company-profiles', {
+        payroll_accounts: payrollAccounts,
+        company_name: companyName,
+      }, { params: { realm_id: realmId } }).then(r => r.data),
+  },
 }
 
 export interface QBOCompany {
@@ -317,6 +334,25 @@ export interface QBOCompany {
   connected: boolean
   token_expired: boolean
   expires_at: string
+}
+
+export interface CompanyProfile {
+  realm_id: string
+  company_name: string | null
+  payroll_accounts: {
+    expense_account: string
+    payroll_vendor: string
+    bank_account: string
+    tax_liability_account: string
+    health_liability_account: string
+    tax_expense_account: string
+    health_expense_account: string
+    dental_expense_account: string
+    dental_vendor: string
+  }
+  allocation_matrix: Record<string, unknown> | null
+  saved: boolean
+  defaults?: Record<string, string>
 }
 
 // ── QBO Data types ────────────────────────────────────────────────────────────
@@ -396,6 +432,28 @@ export interface QBOBankAccount {
   currency: string
   last_reconcile_date: string   // YYYY-MM-DD or ""
   next_statement_date: string   // YYYY-MM-DD or ""
+}
+
+export interface QBOLastReconciliationAccount {
+  id: string
+  name: string
+  full_name: string
+  account_type: string
+  balance: number
+  balance_fmt: string
+  last_reconcile_date: string
+  statement_period_start: string
+  next_statement_date: string
+  status: 'reconciled' | 'never_reconciled' | string
+  reconciliation_report: unknown | null
+  report_error: string | null
+}
+
+export interface QBOLastReconciliationResponse {
+  accounts: QBOLastReconciliationAccount[]
+  focused: QBOLastReconciliationAccount | null
+  total: number
+  fetched_at: string
 }
 
 export interface QBODonor {

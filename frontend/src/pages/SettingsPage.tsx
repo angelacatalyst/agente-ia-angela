@@ -88,6 +88,82 @@ function CompanyCard({ company, isSelected, onSelect }: {
   )
 }
 
+const ACCOUNT_FIELDS: { key: string; label: string; hint: string }[] = [
+  { key: 'payroll_vendor', label: 'Payroll vendor', hint: 'Gusto' },
+  { key: 'bank_account', label: 'Payroll bank account', hint: 'Payroll' },
+  { key: 'expense_account', label: 'Salary expense', hint: 'Salaries & Wages' },
+  { key: 'tax_liability_account', label: 'Tax liability', hint: 'Payroll Tax' },
+  { key: 'health_liability_account', label: 'Dental/vision liability', hint: '2136 Dental/Vision Liability' },
+  { key: 'tax_expense_account', label: 'Tax expense', hint: 'Payroll Taxes' },
+  { key: 'health_expense_account', label: 'Health expense', hint: 'Health Benefits' },
+  { key: 'dental_expense_account', label: 'Dental expense', hint: 'Dental & Vision Plans' },
+  { key: 'dental_vendor', label: 'Dental vendor', hint: 'The Guardian' },
+]
+
+function PayrollCompanyAccountsCard({ realmId, companyName }: { realmId: string; companyName?: string }) {
+  const [accounts, setAccounts] = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [savedOk, setSavedOk] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
+    setSavedOk(false)
+    api.companyProfiles.get(realmId)
+      .then(p => setAccounts({ ...p.payroll_accounts }))
+      .catch(() => setError('Could not load company account map.'))
+      .finally(() => setLoading(false))
+  }, [realmId])
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      const p = await api.companyProfiles.save(realmId, accounts, companyName)
+      setAccounts({ ...p.payroll_accounts })
+      setSavedOk(true)
+    } catch {
+      setError('Could not save company account map.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="card p-6 space-y-4">
+      <h2 className="text-sm font-semibold text-surface-900">Payroll accounts for this company</h2>
+      <p className="text-xs text-surface-500">
+        {companyName || 'Selected QBO company'} — save the chart-of-accounts names used for payroll posting.
+        Allapattah keeps 2136 Dental/Vision Liability. Other companies can use their own names without changing Allapattah.
+      </p>
+      {loading ? (
+        <p className="text-xs text-surface-400">Loading account map…</p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {ACCOUNT_FIELDS.map(f => (
+            <div key={f.key}>
+              <label className="block text-xs font-medium text-surface-600 mb-1.5">{f.label}</label>
+              <input
+                className="input"
+                value={accounts[f.key] ?? ''}
+                placeholder={f.hint}
+                onChange={e => { setAccounts(prev => ({ ...prev, [f.key]: e.target.value })); setSavedOk(false) }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {savedOk && <p className="text-xs text-emerald-700">Saved for this company.</p>}
+      <button type="button" onClick={save} disabled={saving || loading} className="btn-primary text-[13px]">
+        {saving ? 'Saving…' : 'Save company accounts'}
+      </button>
+    </div>
+  )
+}
+
 export function SettingsPage() {
   const { t, lang, setLang } = useI18n()
   const { companies, selectedRealmId, setCompanies, setSelectedRealmId } = useAppStore()
@@ -204,6 +280,13 @@ export function SettingsPage() {
             </div>
           )}
         </div>
+
+        {selectedRealmId && (
+          <PayrollCompanyAccountsCard
+            realmId={selectedRealmId}
+            companyName={companies.find(c => c.realm_id === selectedRealmId)?.company_name}
+          />
+        )}
 
         {/* Language */}
         <div className="card p-6">

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
@@ -86,7 +86,7 @@ export function PayrollPage() {
           payroll_vendor: 'Gusto',
           bank_account: 'Payroll',
           tax_liability_account: 'Payroll Tax',
-          health_liability_account: 'Dental/Vision Liability',
+          health_liability_account: '2136 Dental/Vision Liability',
           tax_expense_account: 'Payroll Taxes',
           health_expense_account: 'Health Benefits',
           dental_expense_account: 'Dental & Vision Plans',
@@ -127,7 +127,7 @@ export function PayrollPage() {
   const [qboAccount, setQboAccount] = useState('Salaries & Wages')
   const [qboBankAccount, setQboBankAccount] = useState('Payroll')
   const [qboTaxAccount, setQboTaxAccount] = useState('Payroll Tax')
-  const [qboHealthAccount, setQboHealthAccount] = useState('Dental/Vision Liability')
+  const [qboHealthAccount, setQboHealthAccount] = useState('2136 Dental/Vision Liability')
   const [qboTaxExpenseAccount, setQboTaxExpenseAccount] = useState('Payroll Taxes')
   const [qboHealthExpenseAccount, setQboHealthExpenseAccount] = useState('Health Benefits')
   const [qboDentalExpenseAccount, setQboDentalExpenseAccount] = useState('Dental & Vision Plans')
@@ -137,6 +137,24 @@ export function PayrollPage() {
   const [qboPosting, setQboPosting] = useState(false)
   const [qboPostResult, setQboPostResult] = useState<PayrollQBOPostResult | null>(null)
   const [qboError, setQboError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!selectedRealmId) return
+    api.companyProfiles.get(selectedRealmId)
+      .then((p) => {
+        const a = p.payroll_accounts
+        setQboVendor(a.payroll_vendor)
+        setQboAccount(a.expense_account)
+        setQboBankAccount(a.bank_account)
+        setQboTaxAccount(a.tax_liability_account)
+        setQboHealthAccount(a.health_liability_account)
+        setQboTaxExpenseAccount(a.tax_expense_account)
+        setQboHealthExpenseAccount(a.health_expense_account)
+        setQboDentalExpenseAccount(a.dental_expense_account)
+        setQboDentalVendor(a.dental_vendor)
+      })
+      .catch(() => { /* keep Allapattah defaults */ })
+  }, [selectedRealmId])
 
   const openQboModal = async () => {
     setQboModalOpen(true)
@@ -223,7 +241,7 @@ export function PayrollPage() {
     setLoading(true)
     setPeriods([])
     try {
-      const result = await api.payroll.process(f, undefined, true)
+      const result = await api.payroll.process(f, undefined, true, selectedRealmId || undefined)
       setPeriods(result.periods)
       setTotalPeriods(result.total_periods)
       setJournalEntries(result.journal_entries ?? [])
@@ -237,9 +255,8 @@ export function PayrollPage() {
   }
 
   const loadMatrix = async () => {
-    if (matrix) return
     setMatrixLoading(true)
-    try { setMatrix(await api.payroll.matrix()) }
+    try { setMatrix(await api.payroll.matrix(selectedRealmId || undefined)) }
     catch { /* silent */ }
     finally { setMatrixLoading(false) }
   }
@@ -1179,7 +1196,7 @@ export function PayrollPage() {
                         { label: 'Bank Account',      val: qboBankAccount,         set: setQboBankAccount,         ph: '1112 Cash:Payroll' },
                         { label: 'Expense Account',   val: qboAccount,             set: setQboAccount,             ph: '6110 Personnel:Salaries' },
                         { label: 'Tax Liability',     val: qboTaxAccount,          set: setQboTaxAccount,          ph: '2131 Payroll Tax' },
-                        { label: 'Health Liability',  val: qboHealthAccount,       set: setQboHealthAccount,       ph: '2136 Health Benefits' },
+                        { label: 'Dental/Vision Liab.', val: qboHealthAccount,     set: setQboHealthAccount,       ph: '2136 Dental/Vision Liability' },
                         { label: 'Tax Expense Acct',  val: qboTaxExpenseAccount,   set: setQboTaxExpenseAccount,   ph: '6130 Payroll Taxes' },
                         { label: 'Health Expense Acct',val: qboHealthExpenseAccount,set: setQboHealthExpenseAccount,ph: '6155 Health Benefits' },
                         { label: 'Dental Expense Acct',val: qboDentalExpenseAccount,set: setQboDentalExpenseAccount,ph: '6152 Vision and Dental' },
@@ -1237,7 +1254,7 @@ export function PayrollPage() {
                             ['Bank Account', qboPreview.qbo_lookups.bank_account],
                             ['Expense Account', qboPreview.qbo_lookups.expense_account],
                             ['Tax Liability', qboPreview.qbo_lookups.tax_liability],
-                            ['Health Liability', qboPreview.qbo_lookups.health_liability],
+                            ['Dental/Vision Liab.', qboPreview.qbo_lookups.health_liability],
                             ['Tax Expense Acct', qboPreview.qbo_lookups.tax_expense],
                             ['Health Expense Acct', qboPreview.qbo_lookups.health_expense],
                             ['Dental Expense Acct', qboPreview.qbo_lookups.dental_expense],

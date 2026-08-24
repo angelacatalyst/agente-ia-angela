@@ -7,6 +7,7 @@ from app.api.v1.endpoints import (
     audit,
     bookkeeping,
     chat,
+    company_profiles,
     controller,
     eod,
     grants,
@@ -31,6 +32,7 @@ api_router.include_router(sops.router)
 api_router.include_router(eod.router)
 api_router.include_router(controller.router)
 api_router.include_router(integrations.router)
+api_router.include_router(company_profiles.router)
 api_router.include_router(qbo_data.router)
 api_router.include_router(payroll.router)
 api_router.include_router(assessment.router)

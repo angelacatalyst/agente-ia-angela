@@ -1,14 +1,13 @@
 import { useState, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PageHeader } from '@/components/layout/PageHeader'
-import { useI18n } from '@/lib/i18n'
 import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
-import type { QBOBankAccount } from '@/lib/api'
+import type { QBOBankAccount, QBOLastReconciliationAccount } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   Landmark, Loader2, CheckCircle2, AlertCircle, RefreshCw,
-  Download, Search, AlertTriangle, DollarSign, ChevronDown,
+  Download, Search, AlertTriangle, DollarSign, ChevronDown, FileText,
 } from 'lucide-react'
 
 const QUICK_PROMPTS = [
@@ -19,8 +18,57 @@ const QUICK_PROMPTS = [
   'Identify any duplicate deposits or payments',
 ]
 
+function formatLastRecReport(accounts: QBOLastReconciliationAccount[], focused: QBOLastReconciliationAccount | null): string {
+  const list = focused ? [focused] : accounts
+  if (!list.length) return 'No bank or credit card accounts found in QBO.'
+
+  const lines: string[] = [
+    '## Last Bank Reconciliation & Statement Status',
+    '',
+    `Fetched from QuickBooks · ${new Date().toLocaleString()}`,
+    '',
+  ]
+
+  for (const a of list) {
+    lines.push(`### ${a.full_name}`)
+    lines.push(`- Type: ${a.account_type}`)
+    lines.push(`- Current QBO Balance: ${a.balance_fmt}`)
+    if (a.last_reconcile_date) {
+      lines.push(`- Last Reconciliation: ${a.last_reconcile_date}`)
+      if (a.statement_period_start) {
+        lines.push(`- Open Statement Period Start: ${a.statement_period_start}`)
+      }
+      if (a.next_statement_date) {
+        lines.push(`- Suggested Next Statement Date: ${a.next_statement_date}`)
+      }
+      lines.push(`- Status: Reconciled through ${a.last_reconcile_date}`)
+    } else {
+      lines.push('- Last Reconciliation: Never reconciled in QBO')
+      lines.push('- Status: Needs first reconciliation')
+    }
+    if (a.report_error) {
+      lines.push(`- Reconciliation report: unavailable (${a.report_error})`)
+    } else if (a.reconciliation_report) {
+      lines.push('- Reconciliation report: loaded from QBO (see statement ending balance in QBO Reconciliation Detail)')
+      try {
+        const raw = JSON.stringify(a.reconciliation_report, null, 2)
+        // Keep report readable but capped
+        lines.push('```')
+        lines.push(raw.length > 4000 ? raw.slice(0, 4000) + '\n… (truncated)' : raw)
+        lines.push('```')
+      } catch {
+        lines.push('- (Could not serialize reconciliation report)')
+      }
+    }
+    lines.push('')
+  }
+
+  lines.push('---')
+  lines.push('Tip: Select an account, enter the bank statement ending balance, then click **Run Bank Reconciliation** for a full AI review.')
+  return lines.join('\n')
+}
+
 export function BankRecPage() {
-  const { t } = useI18n()
   const { selectedRealmId, companies } = useAppStore()
 
   const companyName = companies.find(c => c.realm_id === selectedRealmId)?.company_name
@@ -37,6 +85,8 @@ export function BankRecPage() {
   const [bankAccounts, setBankAccounts] = useState<QBOBankAccount[]>([])
   const [loadingAccounts, setLoadingAccounts] = useState(false)
   const [selectedAccount, setSelectedAccount] = useState<QBOBankAccount | null>(null)
+  const [loadingLastRec, setLoadingLastRec] = useState(false)
+  const [lastRecError, setLastRecError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!selectedRealmId) return
@@ -44,6 +94,7 @@ export function BankRecPage() {
     setBankAccounts([])
     setSelectedAccount(null)
     setAccountName('')
+    setLastRecError(null)
     api.qboData.bankAccounts(selectedRealmId)
       .then(d => setBankAccounts(d.accounts))
       .catch(() => setBankAccounts([]))
@@ -55,6 +106,7 @@ export function BankRecPage() {
     setAccountName(fullName)
     const acct = bankAccounts.find(a => a.full_name === fullName) ?? null
     setSelectedAccount(acct)
+    setLastRecError(null)
     if (acct?.next_statement_date) {
       setStatementDate(acct.next_statement_date)
     }
@@ -86,6 +138,39 @@ export function BankRecPage() {
     setPrompt(p)
     setAccountName('')
     setStatementBalance('')
+  }
+
+  const handleLoadLastReconciliation = async () => {
+    if (!selectedRealmId) return
+    setLoadingLastRec(true)
+    setLastRecError(null)
+    try {
+      // Refresh dropdown metadata first (last rec dates / next statement)
+      const banks = await api.qboData.bankAccounts(selectedRealmId)
+      setBankAccounts(banks.accounts)
+      const refreshed = accountName
+        ? banks.accounts.find(a => a.full_name === accountName) ?? null
+        : selectedAccount
+          ? banks.accounts.find(a => a.id === selectedAccount.id) ?? null
+          : null
+      if (refreshed) {
+        setSelectedAccount(refreshed)
+        if (refreshed.next_statement_date) {
+          setStatementDate(refreshed.next_statement_date)
+        }
+      }
+
+      const data = await api.qboData.lastReconciliation(
+        selectedRealmId,
+        refreshed?.id || selectedAccount?.id,
+      )
+      setResult(formatLastRecReport(data.accounts, data.focused))
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setLastRecError(typeof msg === 'string' ? msg : 'Could not load last reconciliation from QBO.')
+    } finally {
+      setLoadingLastRec(false)
+    }
   }
 
   return (
@@ -253,8 +338,20 @@ export function BankRecPage() {
                 )}
 
                 <button
+                  type="button"
+                  onClick={handleLoadLastReconciliation}
+                  disabled={loadingLastRec || mutation.isPending}
+                  className="w-full justify-center inline-flex items-center gap-2 rounded-lg border border-surface-300 bg-white px-4 py-2.5 text-sm font-medium text-surface-800 hover:bg-surface-50 disabled:opacity-50"
+                >
+                  {loadingLastRec
+                    ? <><Loader2 size={14} className="animate-spin" /> Loading last reconciliation…</>
+                    : <><FileText size={14} /> Load Last Reconciliation & Statements</>
+                  }
+                </button>
+
+                <button
                   onClick={() => mutation.mutate()}
-                  disabled={mutation.isPending || (!prompt && !accountName)}
+                  disabled={mutation.isPending || loadingLastRec || (!prompt && !accountName)}
                   className="btn-primary w-full justify-center"
                 >
                   {mutation.isPending
@@ -263,10 +360,12 @@ export function BankRecPage() {
                   }
                 </button>
 
-                {mutation.isError && (
+                {(mutation.isError || lastRecError) && (
                   <div className="p-3 rounded-lg bg-red-50 border border-red-200 flex items-center gap-2">
                     <AlertCircle size={14} className="text-red-500" />
-                    <p className="text-sm text-red-700">Failed to run reconciliation. Check your QBO connection.</p>
+                    <p className="text-sm text-red-700">
+                      {lastRecError || 'Failed to run reconciliation. Check your QBO connection.'}
+                    </p>
                   </div>
                 )}
               </div>
@@ -295,17 +394,31 @@ export function BankRecPage() {
               <div className="flex items-center gap-2 mb-4">
                 <CheckCircle2 size={16} className="text-primary-600" />
                 <h2 className="text-sm font-semibold text-surface-900">Reconciliation Report</h2>
+                {(mutation.isPending || loadingLastRec) ? null : result ? (
+                  <button
+                    type="button"
+                    onClick={handleLoadLastReconciliation}
+                    className="ml-auto text-xs text-surface-500 hover:text-primary-600 inline-flex items-center gap-1"
+                    title="Refresh last reconciliation"
+                  >
+                    <RefreshCw size={12} /> Refresh
+                  </button>
+                ) : null}
               </div>
 
-              {mutation.isPending && (
+              {(mutation.isPending || loadingLastRec) && (
                 <div className="flex flex-col items-center justify-center py-16 gap-3 text-surface-400">
                   <Loader2 size={28} className="animate-spin text-primary-500" />
-                  <p className="text-sm">Fetching bank data and running reconciliation…</p>
+                  <p className="text-sm">
+                    {loadingLastRec
+                      ? 'Fetching last reconciliation and statements from QBO…'
+                      : 'Fetching bank data and running reconciliation…'}
+                  </p>
                   <p className="text-xs text-surface-300">This may take 15–30 seconds</p>
                 </div>
               )}
 
-              {!result && !mutation.isPending && (
+              {!result && !mutation.isPending && !loadingLastRec && (
                 <div className="flex h-64 items-center justify-center rounded-xl bg-surface-50 border border-dashed border-surface-200">
                   <div className="text-center">
                     <Landmark size={28} className="mx-auto mb-2 text-surface-300" />
@@ -315,7 +428,7 @@ export function BankRecPage() {
                 </div>
               )}
 
-              {result && (
+              {result && !mutation.isPending && !loadingLastRec && (
                 <div className="text-sm text-surface-800 whitespace-pre-wrap leading-relaxed max-h-[600px] overflow-y-auto">
                   {result}
                 </div>
