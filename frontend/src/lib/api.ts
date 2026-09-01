@@ -305,7 +305,7 @@ export const api = {
     qboAuthorize: (userId: string) =>
       apiClient.get('/integrations/qbo/authorize', { params: { user_id: userId } }).then(r => r.data),
     qboDisconnect: (realmId: string) =>
-      apiClient.delete('/integrations/qbo/disconnect', { params: { realm_id: realmId } }).then(r => r.data),
+      apiClient.post('/integrations/qbo/disconnect', null, { params: { realm_id: realmId } }).then(r => r.data),
     qboCompanies: () =>
       apiClient.get<QBOCompany[]>('/integrations/qbo/companies').then(r => r.data),
   },

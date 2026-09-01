@@ -156,10 +156,10 @@ async def qbo_companies(
 
 
 @router.delete("/qbo/disconnect", summary="Disconnect a QBO company")
+@router.post("/qbo/disconnect", summary="Disconnect a QBO company (POST alias)")
 async def qbo_disconnect(
     realm_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(verify_api_key),
 ) -> dict:
     """Remove stored QBO tokens for a realm."""
     token = await db.get(QBOToken, realm_id)
