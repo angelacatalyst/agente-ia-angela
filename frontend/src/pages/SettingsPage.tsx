@@ -4,7 +4,7 @@ import { useI18n } from '@/lib/i18n'
 import { useAppStore } from '@/stores/appStore'
 import { api } from '@/lib/api'
 import type { QBOCompany } from '@/lib/api'
-import { Settings, Eye, EyeOff, CheckCircle2, ExternalLink, Globe, Building2, RefreshCw, AlertCircle } from 'lucide-react'
+import { Settings, Eye, EyeOff, CheckCircle2, ExternalLink, Globe, Building2, RefreshCw, AlertCircle, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 function SecretInput({ label, placeholder, hint }: { label: string; placeholder: string; hint?: string }) {
@@ -36,10 +36,11 @@ function SecretInput({ label, placeholder, hint }: { label: string; placeholder:
 
 const QBO_AUTHORIZE_URL = '/api/v1/integrations/qbo/authorize?user_id=user'
 
-function CompanyCard({ company, isSelected, onSelect }: {
+function CompanyCard({ company, isSelected, onSelect, onRemove }: {
   company: QBOCompany
   isSelected: boolean
   onSelect: () => void
+  onRemove: () => void
 }) {
   const expired = company.token_expired
   return (
@@ -83,6 +84,13 @@ function CompanyCard({ company, isSelected, onSelect }: {
         {isSelected && (
           <span className="text-[10px] font-bold text-primary-600">Active</span>
         )}
+        <button
+          onClick={e => { e.stopPropagation(); onRemove() }}
+          title="Remove company"
+          className="flex items-center gap-1 text-[10px] font-semibold text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded-full transition-colors"
+        >
+          <Trash2 size={9} /> Remove
+        </button>
       </div>
     </div>
   )
@@ -107,6 +115,20 @@ export function SettingsPage() {
       setError('Could not load companies. Check your API connection.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleRemove = async (realmId: string, companyName: string) => {
+    if (!window.confirm(`Remove "${companyName}" from this agent?`)) return
+    try {
+      await api.integrations.qboDisconnect(realmId)
+      const updated = companies.filter(c => c.realm_id !== realmId)
+      setCompanies(updated)
+      if (selectedRealmId === realmId) {
+        setSelectedRealmId(updated.length > 0 ? updated[0].realm_id : null)
+      }
+    } catch {
+      alert('Could not remove company. Try again.')
     }
   }
 
@@ -180,6 +202,7 @@ export function SettingsPage() {
                   company={c}
                   isSelected={c.realm_id === selectedRealmId}
                   onSelect={() => setSelectedRealmId(c.realm_id)}
+                  onRemove={() => handleRemove(c.realm_id, c.company_name)}
                 />
               ))}
               <a
