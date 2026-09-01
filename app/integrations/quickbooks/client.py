@@ -286,6 +286,32 @@ class QBOClient:
             params["end_date"] = end_date
         return await self._get("reports/ProfitAndLoss", params)
 
+    async def get_profit_loss_by_class(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict:
+        """P&L report with columns broken down by Class (program/department)."""
+        params: dict = {"summarize_column_by": "Classes"}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get("reports/ProfitAndLoss", params)
+
+    async def get_profit_loss_by_donor(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict:
+        """P&L report with columns broken down by Customer/Donor (grant)."""
+        params: dict = {"summarize_column_by": "Customers"}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return await self._get("reports/ProfitAndLoss", params)
+
     async def get_transactions_by_customer(
         self,
         customer_id: str,

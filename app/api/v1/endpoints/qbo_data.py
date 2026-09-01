@@ -412,6 +412,38 @@ async def get_project_pl(
     return {"report": pl, "customer_id": customer_id, "fetched_at": datetime.now(timezone.utc).isoformat()}
 
 
+@router.get("/reports/pl-by-class")
+async def get_pl_by_class(
+    realm_id: str = Query(..., description="QBO realm/company ID"),
+    start_date: str = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: str = Query(None, description="End date YYYY-MM-DD"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """P&L broken down by Class (program/department). Shows income and expenses per program."""
+    client = await _get_client(realm_id, db)
+    try:
+        report = await client.get_profit_loss_by_class(start_date, end_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"QBO error: {e}") from e
+    return {"report": report, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.get("/reports/pl-by-donor")
+async def get_pl_by_donor(
+    realm_id: str = Query(..., description="QBO realm/company ID"),
+    start_date: str = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: str = Query(None, description="End date YYYY-MM-DD"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """P&L broken down by Donor/Grant (Customer). Shows what each grant is covering."""
+    client = await _get_client(realm_id, db)
+    try:
+        report = await client.get_profit_loss_by_donor(start_date, end_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"QBO error: {e}") from e
+    return {"report": report, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_bs_value(report: dict, labels: list[str]) -> float | None:
