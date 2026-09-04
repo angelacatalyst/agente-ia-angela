@@ -1517,11 +1517,22 @@ async def void_and_repost_historical(
         if not account_match:   missing.append(f"expense account '{expense_account}'")
         raise HTTPException(422, f"QBO lookup failed for: {', '.join(missing)}. Run dry_run=true first.")
 
-    # ── 5. Void existing agent expenses (parallelized in batches) ────────────
+    # ── 5. Delete agent-created expenses only (manual/bank-feed entries
+    #       cannot be deleted via QBO API — user must handle those in QBO) ──────
     voided: list[dict] = []
     void_errors: list[str] = []
+    manual_skipped: list[dict] = []
 
     import asyncio
+
+    # Split: only attempt to delete agent-created entries (PR-* prefix)
+    agent_only = [p for p in agent_expenses if (p.get("DocNumber") or "").startswith("PR-")]
+    manual_only = [p for p in agent_expenses if not (p.get("DocNumber") or "").startswith("PR-")]
+    for p in manual_only:
+        manual_skipped.append({
+            "id": p["Id"], "doc_number": "(manual)", "date": p.get("TxnDate"),
+            "note": "Cannot delete via API (bank feed) — delete manually in QBO",
+        })
 
     async def _void_one(p: dict):
         try:
@@ -1533,11 +1544,11 @@ async def void_and_repost_historical(
                 "amount":     p.get("TotalAmt"),
             })
         except Exception as e:
-            return ("err", f"Could not void {p.get('DocNumber')} (id {p['Id']}): {e}")
+            return ("err", f"Could not delete {p.get('DocNumber')} (id {p['Id']}): {e}")
 
     BATCH = 20
-    for i in range(0, len(agent_expenses), BATCH):
-        batch = agent_expenses[i:i + BATCH]
+    for i in range(0, len(agent_only), BATCH):
+        batch = agent_only[i:i + BATCH]
         results = await asyncio.gather(*[_void_one(p) for p in batch])
         for status, val in results:
             if status == "ok":
@@ -1545,12 +1556,13 @@ async def void_and_repost_historical(
             else:
                 void_errors.append(val)
 
-    # Abort if too many deletes failed (over 10% failure rate means something systemic)
-    if void_errors and len(void_errors) > len(agent_expenses) * 0.10:
+    # Abort only if agent-entry deletes are failing systemically (>10%)
+    if void_errors and len(void_errors) > len(agent_only) * 0.10:
         return {
             "dry_run": False,
-            "error": "Too many delete failures — aborting repost to avoid duplicates.",
+            "error": "Too many delete failures for agent entries — aborting repost to avoid duplicates.",
             "voided": {"count": len(voided), "items": voided, "errors": void_errors},
+            "manual_requires_cleanup": manual_skipped,
             "reposted": {"count": 0, "items": [], "errors": []},
         }
 
@@ -1661,8 +1673,10 @@ async def void_and_repost_historical(
         },
         "warnings":      all_warnings,
         "budget_status": budget_status,
+        "manual_requires_cleanup": manual_skipped,
         "summary": (
-            f"Voided {len(voided)} expenses, re-posted {len(all_created)} "
-            f"across {len(periods_in_range)} periods."
+            f"Deleted {len(voided)} agent expenses, re-posted {len(all_created)} "
+            f"across {len(periods_in_range)} periods. "
+            f"{len(manual_skipped)} manual/bank-feed entries require manual cleanup in QBO."
         ),
     }
