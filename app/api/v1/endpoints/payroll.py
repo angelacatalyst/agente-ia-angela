@@ -1185,6 +1185,10 @@ async def post_payroll_to_qbo(
             "searched": dental_vendor, "found": dental_vendor_match is not None,
             "qbo_name": dental_vendor_match.get("DisplayName") if dental_vendor_match else None,
             "qbo_id":   dental_vendor_match.get("Id")          if dental_vendor_match else None,
+            "_debug_vendors": [
+                {"Name": v.get("Name"), "DisplayName": v.get("DisplayName"), "CompanyName": v.get("CompanyName")}
+                for v in qbo_vendors
+            ],
         },
         "classes": {
             cls: {
