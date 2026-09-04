@@ -165,7 +165,19 @@ class QBOClient:
 
     async def get_vendors(self, active: bool = True) -> list[dict]:
         where = "WHERE Active = true" if active else ""
-        return await self._query(f"SELECT * FROM Vendor {where} MAXRESULTS 500")
+        # QBO max per page is 1000; fetch pages until exhausted
+        all_vendors: list[dict] = []
+        start = 1
+        page_size = 1000
+        while True:
+            page = await self._query(
+                f"SELECT * FROM Vendor {where} MAXRESULTS {page_size} STARTPOSITION {start}"
+            )
+            all_vendors.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        return all_vendors
 
     async def get_vendor(self, vendor_id: str) -> dict:
         return await self._get(f"vendor/{vendor_id}")
