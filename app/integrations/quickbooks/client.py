@@ -248,6 +248,19 @@ class QBOClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_purchase(self, purchase_id: str, sync_token: str, payload: dict) -> dict:
+        """Update an existing QBO Purchase — replaces Line items with correct allocations.
+        Works for bank-feed imported transactions (cannot be deleted but CAN be updated)."""
+        await self._ensure_token()
+        url = f"{self._base}/purchase"
+        body = {**payload, "Id": purchase_id, "SyncToken": sync_token}
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url, headers=self._headers(), params=self._params(), json=body
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     # ── Chart of Accounts ─────────────────────────────────────────────────────
 
     async def get_chart_of_accounts(self) -> list[dict]:

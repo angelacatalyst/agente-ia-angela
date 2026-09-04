@@ -1517,62 +1517,14 @@ async def void_and_repost_historical(
         if not account_match:   missing.append(f"expense account '{expense_account}'")
         raise HTTPException(422, f"QBO lookup failed for: {', '.join(missing)}. Run dry_run=true first.")
 
-    # ── 5. Delete agent-created expenses only (manual/bank-feed entries
-    #       cannot be deleted via QBO API — user must handle those in QBO) ──────
-    voided: list[dict] = []
-    void_errors: list[str] = []
-    manual_skipped: list[dict] = []
-
+    # ── 5. Pre-build emp_payloads for ALL periods (needed for both update & create) ─
     import asyncio
+    from datetime import date as _date_cls, timedelta as _timedelta
 
-    # Split: only attempt to delete agent-created entries (PR-* prefix)
-    agent_only = [p for p in agent_expenses if (p.get("DocNumber") or "").startswith("PR-")]
-    manual_only = [p for p in agent_expenses if not (p.get("DocNumber") or "").startswith("PR-")]
-    for p in manual_only:
-        manual_skipped.append({
-            "id": p["Id"], "doc_number": "(manual)", "date": p.get("TxnDate"),
-            "note": "Cannot delete via API (bank feed) — delete manually in QBO",
-        })
-
-    async def _void_one(p: dict):
-        try:
-            await qbo.void_purchase(p["Id"], p["SyncToken"])
-            return ("ok", {
-                "id":         p["Id"],
-                "doc_number": p.get("DocNumber"),
-                "date":       p.get("TxnDate"),
-                "amount":     p.get("TotalAmt"),
-            })
-        except Exception as e:
-            return ("err", f"Could not delete {p.get('DocNumber')} (id {p['Id']}): {e}")
-
-    BATCH = 20
-    for i in range(0, len(agent_only), BATCH):
-        batch = agent_only[i:i + BATCH]
-        results = await asyncio.gather(*[_void_one(p) for p in batch])
-        for status, val in results:
-            if status == "ok":
-                voided.append(val)
-            else:
-                void_errors.append(val)
-
-    # Abort only if agent-entry deletes are failing systemically (>10%)
-    if void_errors and len(void_errors) > len(agent_only) * 0.10:
-        return {
-            "dry_run": False,
-            "error": "Too many delete failures for agent entries — aborting repost to avoid duplicates.",
-            "voided": {"count": len(voided), "items": voided, "errors": void_errors},
-            "manual_requires_cleanup": manual_skipped,
-            "reposted": {"count": 0, "items": [], "errors": []},
-        }
-
-    # ── 6. Re-post each period with current matrix ────────────────────────────
-    all_created: list[dict] = []
-    all_post_errors: list[str] = []
     all_warnings: list[str] = []
 
-    for period in periods_in_range:
-        # Build class + customer maps for this period
+    def _build_period_payloads(period: dict) -> tuple[list[dict], list[str]]:
+        """Build QBO expense payloads for one period (shared by update + create paths)."""
         all_classes_p: set[str] = set()
         all_grants_p: set[str] = set()
         has_pending_p = False
@@ -1599,7 +1551,6 @@ async def void_and_repost_historical(
             m = _mc(PENDING_GRANT_NAME)
             customer_map_p["PENDING"] = m["Id"] if m else ""
 
-        # Department map
         department_map_p: dict[str, str] = {}
         for emp in period["employees"]:
             key = emp.get("matrix_key")
@@ -1614,7 +1565,7 @@ async def void_and_repost_historical(
                     department_map_p[full_name] = dm["Id"]
                     department_map_p[title]      = dm["Id"]
 
-        emp_payloads, payload_warns = _build_qbo_expense_payloads(
+        return _build_qbo_expense_payloads(
             period,
             bank_account_id=bank_match["Id"],
             vendor_id=vendor_match["Id"],
@@ -1629,54 +1580,249 @@ async def void_and_repost_historical(
             health_liability_id=health_match["Id"] if health_match else None,
             department_map=department_map_p,
         )
-        all_warnings.extend(payload_warns)
 
-        async def _create_one(ep: dict, period_label: str):
+    # Pre-build payloads for all periods
+    period_payloads: dict[str, list[dict]] = {}  # period_label → emp_payloads
+    for period in periods_in_range:
+        ep, ep_warns = _build_period_payloads(period)
+        period_payloads[period["period"]] = ep
+        all_warnings.extend(ep_warns)
+
+    # ── 6. Split existing entries: agent (PR-*) vs manual ─────────────────────
+    agent_only = [p for p in agent_expenses if (p.get("DocNumber") or "").startswith("PR-")]
+    manual_only = [p for p in agent_expenses if not (p.get("DocNumber") or "").startswith("PR-")]
+
+    # Map each manual entry to a Gusto period by TxnDate proximity (within 7 days of payday)
+    payday_to_period: dict[str, dict] = {p["payday"]: p for p in periods_in_range if p.get("payday")}
+
+    def _find_period_for_txn(txn_date: str) -> dict | None:
+        try:
+            d = _date_cls.fromisoformat(txn_date)
+        except (ValueError, TypeError):
+            return None
+        best, best_delta = None, _timedelta(days=8)
+        for payday_str, period in payday_to_period.items():
             try:
-                result = await qbo.create_purchase(ep["payload"])
-                txn = result.get("Purchase", {})
-                txn_id = txn.get("Id")
-                return ("ok", {
-                    "period":        period_label,
-                    "employee_name": ep["employee_name"],
-                    "expense_type":  ep["expense_type"],
-                    "expense_id":    txn_id,
-                    "doc_number":    txn.get("DocNumber"),
-                    "total":         txn.get("TotalAmt"),
-                    "qbo_link":      f"https://app.qbo.intuit.com/app/expense?txnId={txn_id}",
-                })
-            except Exception as e:
-                return ("err", f"{period_label} / {ep['employee_name']} / {ep['expense_type']}: {e}")
+                pd = _date_cls.fromisoformat(payday_str)
+                delta = abs(d - pd)
+                if delta < best_delta:
+                    best, best_delta = period, delta
+            except ValueError:
+                pass
+        return best
 
-        for i in range(0, len(emp_payloads), BATCH):
-            batch_ep = emp_payloads[i:i + BATCH]
-            results_ep = await asyncio.gather(*[_create_one(ep, period["period"]) for ep in batch_ep])
+    # ── 7. DELETE agent-created entries ───────────────────────────────────────
+    voided: list[dict] = []
+    void_errors: list[str] = []
+
+    async def _void_one(p: dict):
+        try:
+            await qbo.void_purchase(p["Id"], p["SyncToken"])
+            return ("ok", {
+                "id": p["Id"], "doc_number": p.get("DocNumber"),
+                "date": p.get("TxnDate"), "amount": p.get("TotalAmt"),
+            })
+        except Exception as e:
+            return ("err", f"Could not delete {p.get('DocNumber')} (id {p['Id']}): {e}")
+
+    BATCH = 20
+    for i in range(0, len(agent_only), BATCH):
+        batch = agent_only[i:i + BATCH]
+        results = await asyncio.gather(*[_void_one(p) for p in batch])
+        for status, val in results:
+            if status == "ok":
+                voided.append(val)
+            else:
+                void_errors.append(val)
+
+    if void_errors and len(void_errors) > len(agent_only) * 0.10:
+        return {
+            "dry_run": False,
+            "error": "Too many delete failures for agent entries — aborting to avoid duplicates.",
+            "voided": {"count": len(voided), "items": voided, "errors": void_errors},
+            "updated_manual": {"count": 0, "items": [], "errors": []},
+            "reposted": {"count": 0, "items": [], "errors": []},
+        }
+
+    # ── 8. UPDATE manual entries with correct allocations in-place ────────────
+    # Strategy: for each manual entry, find its Gusto period, merge all Lines from
+    # that period's emp_payloads, then UPDATE the QBO transaction in-place.
+    # This avoids deleting bank-feed transactions (which QBO may reject if reconciled)
+    # while still correcting the account/class/grant allocation.
+    updated_manual: list[dict] = []
+    update_errors: list[str] = []
+    manual_skipped: list[dict] = []
+
+    # Group manual entries by matching period
+    manual_by_period: dict[str, list[dict]] = {}
+    for p in manual_only:
+        matched = _find_period_for_txn(p.get("TxnDate", ""))
+        if matched:
+            key = matched["period"]
+            manual_by_period.setdefault(key, []).append(p)
+        else:
+            manual_skipped.append({
+                "id": p["Id"], "date": p.get("TxnDate"),
+                "vendor": p.get("EntityRef", {}).get("name", ""),
+                "note": "Could not match to a Gusto period — update skipped",
+            })
+
+    async def _update_one_manual(manual_txn: dict, merged_payload: dict) -> tuple:
+        try:
+            result = await qbo.update_purchase(
+                manual_txn["Id"], manual_txn["SyncToken"], merged_payload
+            )
+            txn = result.get("Purchase", {})
+            return ("ok", {
+                "id": manual_txn["Id"],
+                "doc_number": manual_txn.get("DocNumber") or "(manual)",
+                "date": manual_txn.get("TxnDate"),
+                "old_amount": manual_txn.get("TotalAmt"),
+                "new_amount": txn.get("TotalAmt"),
+                "vendor": manual_txn.get("EntityRef", {}).get("name", ""),
+            })
+        except Exception as e:
+            return ("err", {
+                "id": manual_txn["Id"],
+                "date": manual_txn.get("TxnDate"),
+                "vendor": manual_txn.get("EntityRef", {}).get("name", ""),
+                "error": str(e),
+                "note": "Update failed — may be reconciled. Delete manually in QBO.",
+            })
+
+    # For each period's manual entries, distribute emp_payloads Lines across them
+    # If period has N manual entries and M emp_payloads: assign payloads round-robin
+    # to manual entries (or merge all into the first entry if only 1 manual entry).
+    periods_covered_by_manual: set[str] = set()
+
+    for period_label, manual_txns in manual_by_period.items():
+        ep_list = period_payloads.get(period_label, [])
+        if not ep_list:
+            for mt in manual_txns:
+                manual_skipped.append({
+                    "id": mt["Id"], "date": mt.get("TxnDate"),
+                    "vendor": mt.get("EntityRef", {}).get("name", ""),
+                    "note": f"No emp_payloads found for period {period_label} — update skipped",
+                })
+            continue
+
+        # Split emp_payloads evenly across manual entries
+        n = len(manual_txns)
+        # Chunk emp_payloads into N groups
+        chunks: list[list[dict]] = [[] for _ in range(n)]
+        for idx, ep in enumerate(ep_list):
+            chunks[idx % n].append(ep)
+
+        update_tasks = []
+        for i, mt in enumerate(manual_txns):
+            chunk = chunks[i]
+            if not chunk:
+                manual_skipped.append({
+                    "id": mt["Id"], "date": mt.get("TxnDate"),
+                    "vendor": mt.get("EntityRef", {}).get("name", ""),
+                    "note": "No payloads assigned to this entry — skipped",
+                })
+                continue
+
+            # Merge all Lines from this chunk's payloads into one
+            merged_lines: list[dict] = []
+            line_counter = 1
+            for ep in chunk:
+                for line in ep["payload"].get("Line", []):
+                    merged_lines.append({**line, "Id": str(line_counter)})
+                    line_counter += 1
+
+            # Build update payload (keep existing AccountRef/EntityRef/TxnDate from the first ep)
+            base = chunk[0]["payload"]
+            merged_payload = {
+                "PaymentType": base.get("PaymentType", "Cash"),
+                "AccountRef":  base.get("AccountRef"),
+                "EntityRef":   mt.get("EntityRef") or base.get("EntityRef"),
+                "TxnDate":     mt.get("TxnDate") or base.get("TxnDate"),
+                "PrivateNote": f"Allocation corrected — {period_label}",
+                "Line":        merged_lines,
+            }
+            if base.get("DepartmentRef"):
+                merged_payload["DepartmentRef"] = base["DepartmentRef"]
+
+            update_tasks.append(_update_one_manual(mt, merged_payload))
+
+        if update_tasks:
+            batch_results = await asyncio.gather(*update_tasks)
+            period_ok = False
+            for status, val in batch_results:
+                if status == "ok":
+                    updated_manual.append(val)
+                    period_ok = True
+                else:
+                    update_errors.append(val)
+            if period_ok:
+                periods_covered_by_manual.add(period_label)
+
+    # ── 9. CREATE new entries only for periods NOT fully covered by manual updates ──
+    all_created: list[dict] = []
+    all_post_errors: list[str] = []
+
+    async def _create_one(ep: dict, period_label: str):
+        try:
+            result = await qbo.create_purchase(ep["payload"])
+            txn = result.get("Purchase", {})
+            txn_id = txn.get("Id")
+            return ("ok", {
+                "period":        period_label,
+                "employee_name": ep["employee_name"],
+                "expense_type":  ep["expense_type"],
+                "expense_id":    txn_id,
+                "doc_number":    txn.get("DocNumber"),
+                "total":         txn.get("TotalAmt"),
+                "qbo_link":      f"https://app.qbo.intuit.com/app/expense?txnId={txn_id}",
+            })
+        except Exception as e:
+            return ("err", f"{period_label} / {ep['employee_name']} / {ep['expense_type']}: {e}")
+
+    for period in periods_in_range:
+        period_label = period["period"]
+        if period_label in periods_covered_by_manual:
+            # Manual entries for this period were successfully updated — no need to create new ones
+            continue
+        emp_payloads_for_period = period_payloads.get(period_label, [])
+        for i in range(0, len(emp_payloads_for_period), BATCH):
+            batch_ep = emp_payloads_for_period[i:i + BATCH]
+            results_ep = await asyncio.gather(*[_create_one(ep, period_label) for ep in batch_ep])
             for status, val in results_ep:
                 if status == "ok":
                     all_created.append(val)
                 else:
                     all_post_errors.append(val)
 
+    manual_update_failures = [e for e in update_errors if isinstance(e, dict)]
+
     return {
-        "dry_run":       False,
-        "date_range":    {"from": date_from, "to": date_to},
+        "dry_run":    False,
+        "date_range": {"from": date_from, "to": date_to},
         "voided": {
             "count":  len(voided),
             "items":  voided,
             "errors": void_errors,
         },
+        "updated_manual": {
+            "count":  len(updated_manual),
+            "items":  updated_manual,
+            "errors": manual_update_failures,
+            "skipped": manual_skipped,
+        },
         "reposted": {
-            "count":       len(all_created),
-            "items":       all_created,
-            "errors":      all_post_errors,
+            "count":        len(all_created),
+            "items":        all_created,
+            "errors":       all_post_errors,
             "total_posted": round(sum(c.get("total") or 0 for c in all_created), 2),
         },
         "warnings":      all_warnings,
         "budget_status": budget_status,
-        "manual_requires_cleanup": manual_skipped,
         "summary": (
-            f"Deleted {len(voided)} agent expenses, re-posted {len(all_created)} "
-            f"across {len(periods_in_range)} periods. "
-            f"{len(manual_skipped)} manual/bank-feed entries require manual cleanup in QBO."
+            f"Deleted {len(voided)} agent entries. "
+            f"Updated {len(updated_manual)} manual entries in-place with correct allocations "
+            f"({len(manual_update_failures)} failed — likely reconciled, delete manually). "
+            f"Created {len(all_created)} new entries for periods without manual coverage."
         ),
     }
