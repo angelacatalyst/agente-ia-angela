@@ -77,6 +77,7 @@ export function PayrollPage() {
       form.append('file', fixFileRef.current.files[0])
       const { apiClient } = await import('@/lib/api')
       const resp = await apiClient.post('/payroll/void-and-repost', form, {
+        headers: { 'Content-Type': undefined },  // let axios set multipart/form-data with boundary
         params: {
           realm_id: fixRealm,
           date_from: fixDateFrom,
