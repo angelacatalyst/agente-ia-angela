@@ -639,12 +639,15 @@ def _best_qbo_match(
         cn = _normalize_name(item.get(name_key) or "")
         if cn and cn == tn:
             return item
-    # 2. one string contains the other — skip empty candidates to avoid
-    #    false positives (empty string is always a substring in Python)
+    # 2. one string contains the other — require the shorter string to be at
+    #    least 40% the length of the longer one to avoid "Insurance" matching
+    #    "Payroll Health Insurance - Dental & Vision Plans"
     for item in items:
         cn = _normalize_name(item.get(name_key) or "")
         if cn and (cn in tn or tn in cn):
-            return item
+            ratio = len(cn) / len(tn) if len(tn) else 0
+            if ratio >= 0.4:
+                return item
     # 3. all significant words present in the candidate
     words = [w for w in tn.split() if len(w) > 2]
     if words:
@@ -986,8 +989,8 @@ async def post_payroll_to_qbo(
         description="Payroll tax liability account (negative line). Leave blank to omit.",
     ),
     health_liability_account: str = Query(
-        "Dental/Vision Liability",
-        description="Dental/vision liability account 2136 (negative line). Leave blank to omit.",
+        "Payroll Health Insurance - Dental & Vision Plan",
+        description="Dental/vision liability account (negative line). Leave blank to omit.",
     ),
     tax_expense_account: str = Query(
         "Payroll Taxes",
@@ -1339,10 +1342,10 @@ async def void_and_repost_historical(
     payroll_vendor: str = Query("Gusto"),
     bank_account: str = Query("Payroll"),
     tax_liability_account: str = Query("Payroll Tax"),
-    health_liability_account: str = Query("Payroll Health"),
+    health_liability_account: str = Query("Payroll Health Insurance - Dental & Vision Plan"),
     tax_expense_account: str = Query("Payroll Taxes"),
     health_expense_account: str = Query("Health Benefits"),
-    dental_expense_account: str = Query("Vision and Dental"),
+    dental_expense_account: str = Query("Dental & Vision Plans"),
     dental_vendor: str = Query("The Guardian"),
     dry_run: bool = Query(True, description="true = preview only; false = void + repost"),
     db: AsyncSession = Depends(get_db),
@@ -1478,8 +1481,11 @@ async def void_and_repost_historical(
     qbo_banks = [a for a in qbo_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
 
     def _mv(name: str) -> dict | None:
-        return (_best_qbo_match(name, qbo_vendors, "DisplayName")
-                or _best_qbo_match(name, qbo_vendors, "CompanyName"))
+        return (
+            _best_qbo_match(name, qbo_vendors, "Name")
+            or _best_qbo_match(name, qbo_vendors, "DisplayName")
+            or _best_qbo_match(name, qbo_vendors, "CompanyName")
+        )
 
     def _ma(name: str, pool: list[dict]) -> dict | None:
         return (_best_qbo_match(name, pool, "Name")
