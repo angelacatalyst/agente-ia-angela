@@ -1517,21 +1517,33 @@ async def void_and_repost_historical(
         if not account_match:   missing.append(f"expense account '{expense_account}'")
         raise HTTPException(422, f"QBO lookup failed for: {', '.join(missing)}. Run dry_run=true first.")
 
-    # ── 5. Void existing agent expenses ──────────────────────────────────────
+    # ── 5. Void existing agent expenses (parallelized in batches) ────────────
     voided: list[dict] = []
     void_errors: list[str] = []
 
-    for p in agent_expenses:
+    import asyncio
+
+    async def _void_one(p: dict):
         try:
             await qbo.void_purchase(p["Id"], p["SyncToken"])
-            voided.append({
+            return ("ok", {
                 "id":         p["Id"],
                 "doc_number": p.get("DocNumber"),
                 "date":       p.get("TxnDate"),
                 "amount":     p.get("TotalAmt"),
             })
         except Exception as e:
-            void_errors.append(f"Could not void {p.get('DocNumber')} (id {p['Id']}): {e}")
+            return ("err", f"Could not void {p.get('DocNumber')} (id {p['Id']}): {e}")
+
+    BATCH = 20
+    for i in range(0, len(agent_expenses), BATCH):
+        batch = agent_expenses[i:i + BATCH]
+        results = await asyncio.gather(*[_void_one(p) for p in batch])
+        for status, val in results:
+            if status == "ok":
+                voided.append(val)
+            else:
+                void_errors.append(val)
 
     # ── 6. Re-post each period with current matrix ────────────────────────────
     all_created: list[dict] = []
@@ -1598,13 +1610,13 @@ async def void_and_repost_historical(
         )
         all_warnings.extend(payload_warns)
 
-        for ep in emp_payloads:
+        async def _create_one(ep: dict, period_label: str):
             try:
                 result = await qbo.create_purchase(ep["payload"])
                 txn = result.get("Purchase", {})
                 txn_id = txn.get("Id")
-                all_created.append({
-                    "period":        period["period"],
+                return ("ok", {
+                    "period":        period_label,
                     "employee_name": ep["employee_name"],
                     "expense_type":  ep["expense_type"],
                     "expense_id":    txn_id,
@@ -1613,9 +1625,16 @@ async def void_and_repost_historical(
                     "qbo_link":      f"https://app.qbo.intuit.com/app/expense?txnId={txn_id}",
                 })
             except Exception as e:
-                all_post_errors.append(
-                    f"{period['period']} / {ep['employee_name']} / {ep['expense_type']}: {e}"
-                )
+                return ("err", f"{period_label} / {ep['employee_name']} / {ep['expense_type']}: {e}")
+
+        for i in range(0, len(emp_payloads), BATCH):
+            batch_ep = emp_payloads[i:i + BATCH]
+            results_ep = await asyncio.gather(*[_create_one(ep, period["period"]) for ep in batch_ep])
+            for status, val in results_ep:
+                if status == "ok":
+                    all_created.append(val)
+                else:
+                    all_post_errors.append(val)
 
     return {
         "dry_run":       False,
