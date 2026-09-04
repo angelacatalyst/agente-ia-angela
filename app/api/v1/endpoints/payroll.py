@@ -1545,6 +1545,15 @@ async def void_and_repost_historical(
             else:
                 void_errors.append(val)
 
+    # Abort if too many deletes failed (over 10% failure rate means something systemic)
+    if void_errors and len(void_errors) > len(agent_expenses) * 0.10:
+        return {
+            "dry_run": False,
+            "error": "Too many delete failures — aborting repost to avoid duplicates.",
+            "voided": {"count": len(voided), "items": voided, "errors": void_errors},
+            "reposted": {"count": 0, "items": [], "errors": []},
+        }
+
     # ── 6. Re-post each period with current matrix ────────────────────────────
     all_created: list[dict] = []
     all_post_errors: list[str] = []

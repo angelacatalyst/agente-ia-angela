@@ -234,14 +234,15 @@ class QBOClient:
         )
 
     async def void_purchase(self, purchase_id: str, sync_token: str) -> dict:
-        """Void a QBO Purchase by Id + SyncToken. Preserves audit trail."""
+        """Delete a QBO Purchase by Id + SyncToken.
+        Note: QBO does not support 'void' for Purchase objects — only 'delete'."""
         await self._ensure_token()
         url = f"{self._base}/purchase"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 url,
                 headers=self._headers(),
-                params={**self._params(), "operation": "void"},
+                params={**self._params(), "operation": "delete"},
                 json={"Id": purchase_id, "SyncToken": sync_token},
             )
             resp.raise_for_status()
