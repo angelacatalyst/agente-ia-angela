@@ -374,8 +374,10 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             }
 
             # ── Step 2: apply waterfall per pool ──────────────────────────
-            # grant_charges[grant_name] = amount charged this period
+            # grant_charges[grant_name] = total amount charged this period (global, for display)
+            # pool_grant_charges_list = per-pool charges used to build expense lines correctly
             grant_charges: dict[str, float] = {}
+            pool_grant_charges_list: list[dict] = []   # [{pool_classes, pool_total, grants}]
             pending_amount = 0.0
             # class → which grant covered it (for display)
             class_grant_coverage: dict[str, str] = {}
@@ -384,6 +386,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             for pool in profile.get("grant_rules", []):
                 pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
                 remaining = pool_cost
+                pool_gc: dict[str, float] = {}   # grant charges for THIS pool only
 
                 for g in pool["waterfall"]:
                     gname = g["name"]
@@ -397,6 +400,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
                     used = min(remaining, available)
                     budget_remaining[key][gname] = round(available - used, 4)
                     grant_charges[gname] = round(grant_charges.get(gname, 0.0) + used, 4)
+                    pool_gc[gname] = round(pool_gc.get(gname, 0.0) + used, 4)
                     remaining = round(remaining - used, 4)
                     if remaining <= 0:
                         break
@@ -406,23 +410,25 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
                     grant_charges["PENDING"] = round(
                         grant_charges.get("PENDING", 0.0) + remaining, 4
                     )
+                    pool_gc["PENDING"] = round(pool_gc.get("PENDING", 0.0) + remaining, 4)
+
+                pool_grant_charges_list.append({
+                    "pool_classes": pool["pool_classes"],
+                    "pool_total":   round(pool_cost, 4),
+                    "grants":       pool_gc,
+                })
 
             # Assign class → grant label for display (proportional to class cost)
-            for pool in profile.get("grant_rules", []):
-                pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
+            for pool_info in pool_grant_charges_list:
+                pool_cost = pool_info["pool_total"]
+                pool_gc   = pool_info["grants"]
                 if pool_cost == 0:
-                    for c in pool["pool_classes"]:
+                    for c in pool_info["pool_classes"]:
                         class_grant_coverage[c] = "—"
                     continue
-                # Determine which grant(s) this pool drew from
-                pool_grants_used = [
-                    g["name"] for g in pool["waterfall"]
-                    if grant_charges.get(g["name"], 0) > 0
-                ]
-                if "PENDING" in grant_charges and pending_amount > 0:
-                    pool_grants_used.append("PENDING")
+                pool_grants_used = [g for g, a in pool_gc.items() if a > 0]
                 label = " → ".join(pool_grants_used) if pool_grants_used else "PENDING"
-                for c in pool["pool_classes"]:
+                for c in pool_info["pool_classes"]:
                     class_grant_coverage[c] = label
 
             # Build per-class breakdown dict
@@ -468,9 +474,10 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
                 "total_cost":            round(total_cost, 2),
                 "dental_vision_employer": dental,
                 "allocation": {
-                    "classes":       class_breakdown,
-                    "grant_charges": grant_charges,
-                    "pending":       round(pending_amount, 2),
+                    "classes":             class_breakdown,
+                    "grant_charges":       grant_charges,
+                    "pool_grant_charges":  pool_grant_charges_list,
+                    "pending":             round(pending_amount, 2),
                 },
                 "budget_remaining": budget_snapshot,
                 "note": profile.get("note"),
@@ -622,7 +629,8 @@ GRANT_NAME_ALIASES: dict[str, str] = {
     "MHFA 2026-2027":                "MHFA 2026-2027 ($25,000) Q4-26",
     "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
     "Citi Community Progress Grant": "Citi- Community Progress Maker Grant",
-    "City of Miami District 1:City of Miami District 1- MFE Funds":  "City of Miami District 1- MFE Funds",
+    "City of Miami District 1:City of Miami District 1- MFE Funds":  "City of Miami District 1- MFE Funds ($200,000)",
+    "Miami-Dade County Office of the Mayor:MDC Mayor Cava":          "MDC Mayor Cava ($71,200)",
     "Truist Foundation":             "Truist Foundation ($100,000)",
     "B3 Living Cities 2026":         "B3- Living Cities 2026",
     "First Citizen Bank":            "First Citizen Bank ($20,000)",
@@ -678,46 +686,76 @@ def _best_qbo_match(
 def _get_expense_lines_for_emp(emp: dict) -> list[dict]:
     """
     Return flat list of {cls, grant, amount} for one employee.
-    Splits each class cost proportionally across the grants that covered its pool.
+    Uses per-pool grant charges so that a grant shared across multiple pools
+    (e.g. Truist covering Pool 1 partially and Pool 2 fully) is NOT double-counted.
     """
     rows: list[dict] = []
     key = emp.get("matrix_key")
     if not key or not emp.get("allocation"):
         return rows
 
-    profile = ALLOCATION_MATRIX[key]
     class_amounts = {
         cls: data["amount"]
         for cls, data in emp["allocation"]["classes"].items()
     }
-    grant_charges = emp["allocation"]["grant_charges"]
 
-    for pool in profile.get("grant_rules", []):
-        pool_classes = pool["pool_classes"]
-        pool_total = sum(class_amounts.get(c, 0.0) for c in pool_classes)
-        if pool_total == 0:
-            continue
+    # Prefer per-pool grant charges (new structure); fall back to global for old data
+    pool_grant_charges_list: list[dict] = emp["allocation"].get("pool_grant_charges") or []
 
-        pool_grants: list[tuple[str, float]] = []
-        for g in pool["waterfall"]:
-            amt = grant_charges.get(g["name"], 0.0)
-            if amt > 0:
-                pool_grants.append((g["name"], amt))
+    if pool_grant_charges_list:
+        # New path: each pool has its own isolated grant charges
+        for pool_info in pool_grant_charges_list:
+            pool_classes = pool_info["pool_classes"]
+            pool_total   = pool_info["pool_total"]
+            pool_gc      = pool_info["grants"]   # {grant_name: amount} for this pool only
 
-        pool_covered = sum(a for _, a in pool_grants)
-        pool_pending = round(pool_total - pool_covered, 4)
-        if pool_pending > 0.005:
-            pool_grants.append(("PENDING", pool_pending))
-
-        for cls in pool_classes:
-            class_amt = class_amounts.get(cls, 0.0)
-            if class_amt == 0:
+            if pool_total == 0:
                 continue
-            ratio = class_amt / pool_total
-            for gname, pool_grant_amt in pool_grants:
-                line_amt = round(pool_grant_amt * ratio, 2)
-                if line_amt > 0:
-                    rows.append({"cls": cls, "grant": gname, "amount": line_amt})
+
+            pool_grants: list[tuple[str, float]] = [
+                (gname, amt) for gname, amt in pool_gc.items() if amt > 0
+            ]
+            pool_covered = sum(a for _, a in pool_grants)
+            pool_pending = round(pool_total - pool_covered, 4)
+            if pool_pending > 0.005:
+                pool_grants.append(("PENDING", pool_pending))
+
+            for cls in pool_classes:
+                class_amt = class_amounts.get(cls, 0.0)
+                if class_amt == 0:
+                    continue
+                ratio = class_amt / pool_total
+                for gname, pool_grant_amt in pool_grants:
+                    line_amt = round(pool_grant_amt * ratio, 2)
+                    if line_amt > 0:
+                        rows.append({"cls": cls, "grant": gname, "amount": line_amt})
+    else:
+        # Legacy fallback: single-pool employees (global grant_charges is correct)
+        profile = ALLOCATION_MATRIX[key]
+        grant_charges = emp["allocation"]["grant_charges"]
+        for pool in profile.get("grant_rules", []):
+            pool_classes = pool["pool_classes"]
+            pool_total = sum(class_amounts.get(c, 0.0) for c in pool_classes)
+            if pool_total == 0:
+                continue
+            pool_grants = [
+                (g["name"], grant_charges.get(g["name"], 0.0))
+                for g in pool["waterfall"]
+                if grant_charges.get(g["name"], 0.0) > 0
+            ]
+            pool_covered = sum(a for _, a in pool_grants)
+            pool_pending = round(pool_total - pool_covered, 4)
+            if pool_pending > 0.005:
+                pool_grants.append(("PENDING", pool_pending))
+            for cls in pool_classes:
+                class_amt = class_amounts.get(cls, 0.0)
+                if class_amt == 0:
+                    continue
+                ratio = class_amt / pool_total
+                for gname, pool_grant_amt in pool_grants:
+                    line_amt = round(pool_grant_amt * ratio, 2)
+                    if line_amt > 0:
+                        rows.append({"cls": cls, "grant": gname, "amount": line_amt})
 
     return rows
 
