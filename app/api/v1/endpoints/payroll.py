@@ -170,13 +170,13 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
                 "waterfall": [
                     {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
-                    {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
+                    {"name": "City of Miami District 1:City of Miami District 1- MFE Funds", "annual_budget": 200000.00},
                 ],
             },
             {
                 "pool_classes": ["Smithsonian", "Festival del Platano"],
                 "waterfall": [
-                    {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
+                    {"name": "City of Miami District 1:City of Miami District 1- MFE Funds", "annual_budget": 200000.00},
                 ],
             },
         ],
@@ -622,7 +622,7 @@ GRANT_NAME_ALIASES: dict[str, str] = {
     "MHFA 2026-2027":                "MHFA 2026-2027 ($25,000) Q4-26",
     "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
     "Citi Community Progress Grant": "Citi- Community Progress Maker Grant",
-    "City of Miami District 1 MFE":  "City of Miami District 1- MFE Funds",
+    "City of Miami District 1:City of Miami District 1- MFE Funds":  "City of Miami District 1- MFE Funds",
     "Truist Foundation":             "Truist Foundation ($100,000)",
     "B3 Living Cities 2026":         "B3- Living Cities 2026",
     "First Citizen Bank":            "First Citizen Bank ($20,000)",
