@@ -162,16 +162,20 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.20,
             "Festival del Platano": 0.20,
         },
-        # Waterfall: Mayor Cava (Apr 2026+, $22,500 salary + $2,846.25 fringe = $25,346.25)
-        # then City of Miami District 1 MFE covers the rest
+        # Pool 1: Mayor Cava (Apr 2026+) covers SBRC, La Oficina, Negocios, Capital Readiness
+        #          then City of Miami MFE takes over if Mayor Cava runs out
+        # Pool 2: Smithsonian + Festival del Platano → City of Miami MFE only (Mayor Cava does NOT apply)
         "grant_rules": [
             {
-                "pool_classes": [
-                    "SBRC", "La Oficina", "Negocios",
-                    "Capital Readiness", "Smithsonian", "Festival del Platano",
-                ],
+                "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
                 "waterfall": [
                     {"name": "Miami-Dade County Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
+                    {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
+                ],
+            },
+            {
+                "pool_classes": ["Smithsonian", "Festival del Platano"],
+                "waterfall": [
                     {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
                 ],
             },
@@ -192,16 +196,20 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "CPA":                0.15,
             "Tradicion en Accion": 0.20,
         },
-        # Waterfall: Mayor Cava (May 2026+, $9,375 salary + $1,363.30 fringe = $10,738.30)
-        # then Truist Foundation covers the rest
+        # Pool 1: Mayor Cava (May 2026+) covers SBRC, Negocios, Capital Readiness
+        #          then Truist Foundation takes over if Mayor Cava runs out
+        # Pool 2: ILB, CPA, Tradicion en Accion → Truist Foundation only (Mayor Cava does NOT apply)
         "grant_rules": [
             {
-                "pool_classes": [
-                    "SBRC", "Negocios", "Capital Readiness",
-                    "ILB", "CPA", "Tradicion en Accion",
-                ],
+                "pool_classes": ["SBRC", "Negocios", "Capital Readiness"],
                 "waterfall": [
                     {"name": "Miami-Dade County Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01"},
+                    {"name": "Truist Foundation", "annual_budget": 100000.00},
+                ],
+            },
+            {
+                "pool_classes": ["ILB", "CPA", "Tradicion en Accion"],
+                "waterfall": [
                     {"name": "Truist Foundation", "annual_budget": 100000.00},
                 ],
             },
