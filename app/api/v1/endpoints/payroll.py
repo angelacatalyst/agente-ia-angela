@@ -154,6 +154,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
         "title": "Program Manager, Small Business Growth",
         "gusto_last": "Rios",
         "gusto_first": "Drelly",
+        # Default classes: Jan-Mar and Oct-Dec
         "classes": {
             "SBRC":               0.10,
             "La Oficina":         0.20,
@@ -162,6 +163,21 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.20,
             "Festival del Platano": 0.20,
         },
+        # Date-ranged overrides (checked first; falls back to "classes" if no match)
+        "period_classes": [
+            {
+                "start_date": "2026-04-01",
+                "end_date":   "2026-09-30",
+                "classes": {
+                    "SBRC":               0.25,
+                    "La Oficina":         0.20,
+                    "Negocios":           0.10,
+                    "Capital Readiness":  0.20,
+                    "Smithsonian":        0.15,
+                    "Festival del Platano": 0.10,
+                },
+            },
+        ],
         # Pool 1: Mayor Cava (Apr 2026+) covers SBRC, La Oficina, Negocios, Capital Readiness
         #          then City of Miami MFE takes over if Mayor Cava runs out
         # Pool 2: Smithsonian + Festival del Platano → City of Miami MFE only (Mayor Cava does NOT apply)
@@ -188,6 +204,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
         "title": "Community Navigator",
         "gusto_last": "Buraschi",
         "gusto_first": "Maricarmen",
+        # Default classes: Jan-Apr and Oct-Dec
         "classes": {
             "SBRC":               0.20,
             "Negocios":           0.15,
@@ -196,6 +213,21 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "CPA":                0.15,
             "Tradicion en Accion": 0.20,
         },
+        # Date-ranged overrides (checked first; falls back to "classes" if no match)
+        "period_classes": [
+            {
+                "start_date": "2026-05-01",
+                "end_date":   "2026-09-30",
+                "classes": {
+                    "SBRC":               0.20,
+                    "Negocios":           0.15,
+                    "Capital Readiness":  0.15,
+                    "ILB":                0.15,
+                    "CPA":                0.15,
+                    "Tradicion en Accion": 0.20,
+                },
+            },
+        ],
         # Pool 1: Mayor Cava (May 2026+) covers SBRC, Negocios, Capital Readiness
         #          then Truist Foundation takes over if Mayor Cava runs out
         # Pool 2: ILB, CPA, Tradicion en Accion → Truist Foundation only (Mayor Cava does NOT apply)
@@ -367,10 +399,19 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             dental = profile.get("dental_vision_employer", 0.0)
             total_cost = emp["gross"] + emp["employer_taxes"] + emp["health_allowance"] + dental
 
+            period_payday = period.get("payday", "")
+
             # ── Step 1: calculate dollar amount per class ──────────────────
+            # Use period_classes override if payday falls within a defined range
+            active_classes = profile["classes"]  # default (Jan-Mar / Oct-Dec)
+            for pc in profile.get("period_classes", []):
+                if pc["start_date"] <= period_payday <= pc["end_date"]:
+                    active_classes = pc["classes"]
+                    break
+
             class_amounts: dict[str, float] = {
                 cls: round(total_cost * pct, 4)
-                for cls, pct in profile["classes"].items()
+                for cls, pct in active_classes.items()
             }
 
             # ── Step 2: apply waterfall per pool ──────────────────────────
@@ -381,8 +422,6 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             pending_amount = 0.0
             # class → which grant covered it (for display)
             class_grant_coverage: dict[str, str] = {}
-
-            period_payday = period.get("payday", "")
             for pool in profile.get("grant_rules", []):
                 pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
                 remaining = pool_cost
