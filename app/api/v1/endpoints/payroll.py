@@ -169,7 +169,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             {
                 "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
                 "waterfall": [
-                    {"name": "Miami-Dade County Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
+                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
                     {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
                 ],
             },
@@ -203,7 +203,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             {
                 "pool_classes": ["SBRC", "Negocios", "Capital Readiness"],
                 "waterfall": [
-                    {"name": "Miami-Dade County Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01"},
+                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01"},
                     {"name": "Truist Foundation", "annual_budget": 100000.00},
                 ],
             },
