@@ -569,15 +569,15 @@ export function PayrollPage() {
               <summary className="flex items-center gap-2 px-5 py-3.5 cursor-pointer select-none hover:bg-surface-100 transition-colors">
                 <AlertTriangle size={14} className="text-amber-500 shrink-0" />
                 <span className="text-sm font-semibold text-surface-800">
-                  Corregir nóminas históricas — Void &amp; Re-post
+                  Corregir nóminas históricas — Eliminar &amp; Re-postear
                 </span>
-                <span className="ml-auto text-[11px] text-surface-400">Enero – Julio 2025</span>
+                <span className="ml-auto text-[11px] text-surface-400">2026</span>
               </summary>
 
               <div className="border-t border-surface-200 px-5 py-4 space-y-4">
                 <p className="text-xs text-surface-500">
-                  Voidea los Expenses de nómina existentes en QBO — tanto los del agente (<code className="bg-surface-100 px-1 rounded">PR-*</code>) como los ingresados manualmente (vendor Gusto / The Guardian) — en el rango de fechas y los re-postea con los porcentajes actuales del ALLOCATION_MATRIX y los departamentos correctos.
-                  Usa <strong>Vista previa</strong> primero para confirmar qué se va a anular y re-postear.
+                  Elimina los Expenses de nómina existentes en QBO — tanto los del agente (<code className="bg-surface-100 px-1 rounded">PR-*</code>) como los ingresados manualmente (vendor Gusto / The Guardian) — en el rango de fechas y los re-postea con los porcentajes actuales del ALLOCATION_MATRIX y los departamentos correctos.
+                  Usa <strong>Vista previa</strong> primero para confirmar qué se va a eliminar y re-postear.
                 </p>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -609,7 +609,7 @@ export function PayrollPage() {
                   {/* Gusto file */}
                   <div className="col-span-2">
                     <label className="block text-xs font-medium text-surface-600 mb-1">
-                      Archivo Gusto (.xlsx) — todos los períodos enero-julio
+                      Archivo Gusto (.xlsx) — períodos a corregir
                     </label>
                     <div
                       onClick={() => fixFileRef.current?.click()}
@@ -662,7 +662,7 @@ export function PayrollPage() {
                     {fixResult.dry_run ? (
                       <>
                         <p className="font-semibold">Vista previa:</p>
-                        <p>🗑️ Se anularán <strong>{fixResult.to_void?.count ?? 0}</strong> expenses
+                        <p>🗑️ Se eliminarán <strong>{fixResult.to_void?.count ?? 0}</strong> expenses
                           {fixResult.to_void?.agent_count != null && (
                             <span className="text-blue-600"> ({fixResult.to_void.agent_count} agente + {fixResult.to_void.manual_count} manual)</span>
                           )}
@@ -670,7 +670,7 @@ export function PayrollPage() {
                         <p>✅ Se re-postearán <strong>{fixResult.to_repost?.period_count ?? 0}</strong> períodos con los % actuales</p>
                         {fixResult.to_void?.expenses?.length > 0 && (
                           <details className="mt-1">
-                            <summary className="cursor-pointer font-medium">Ver expenses a anular</summary>
+                            <summary className="cursor-pointer font-medium">Ver expenses a eliminar</summary>
                             <div className="mt-1 space-y-0.5 max-h-48 overflow-y-auto">
                               {fixResult.to_void.expenses.map((e: any, i: number) => (
                                 <div key={i} className="font-mono text-[10px] flex items-center gap-2">
@@ -690,7 +690,7 @@ export function PayrollPage() {
                     ) : (
                       <>
                         <p className="font-semibold">{fixResult.summary}</p>
-                        <p>🗑️ Anulados: <strong>{fixResult.voided?.count}</strong>
+                        <p>🗑️ Eliminados: <strong>{fixResult.voided?.count}</strong>
                           {fixResult.voided?.errors?.length > 0 &&
                             <span className="text-red-600 ml-1">({fixResult.voided.errors.length} errores)</span>}
                         </p>
