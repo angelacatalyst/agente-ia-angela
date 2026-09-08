@@ -162,7 +162,8 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.20,
             "Festival del Platano": 0.20,
         },
-        # City of Miami District 1 - MFE Funds $200,000 covers all classes
+        # Waterfall: Mayor Cava (Apr 2026+, $22,500 salary + $2,846.25 fringe = $25,346.25)
+        # then City of Miami District 1 MFE covers the rest
         "grant_rules": [
             {
                 "pool_classes": [
@@ -170,6 +171,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "Capital Readiness", "Smithsonian", "Festival del Platano",
                 ],
                 "waterfall": [
+                    {"name": "Miami-Dade County Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
                     {"name": "City of Miami District 1 MFE", "annual_budget": 200000.00},
                 ],
             },
@@ -190,7 +192,8 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "CPA":                0.15,
             "Tradicion en Accion": 0.20,
         },
-        # Truist Foundation $100,000 Q1 2026 covers all classes
+        # Waterfall: Mayor Cava (May 2026+, $9,375 salary + $1,363.30 fringe = $10,738.30)
+        # then Truist Foundation covers the rest
         "grant_rules": [
             {
                 "pool_classes": [
@@ -198,6 +201,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                     "ILB", "CPA", "Tradicion en Accion",
                 ],
                 "waterfall": [
+                    {"name": "Miami-Dade County Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01"},
                     {"name": "Truist Foundation", "annual_budget": 100000.00},
                 ],
             },
@@ -368,12 +372,17 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             # class → which grant covered it (for display)
             class_grant_coverage: dict[str, str] = {}
 
+            period_payday = period.get("payday", "")
             for pool in profile.get("grant_rules", []):
                 pool_cost = sum(class_amounts.get(c, 0.0) for c in pool["pool_classes"])
                 remaining = pool_cost
 
                 for g in pool["waterfall"]:
                     gname = g["name"]
+                    # Respect start_date: skip grant if period payday is before its start
+                    g_start = g.get("start_date")
+                    if g_start and period_payday < g_start:
+                        continue
                     available = budget_remaining[key].get(gname, 0.0)
                     if available <= 0 or remaining <= 0:
                         continue
