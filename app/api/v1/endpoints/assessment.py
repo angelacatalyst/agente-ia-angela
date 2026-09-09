@@ -294,6 +294,7 @@ async def run_assessment(
         items_list,
         employee_list,
         vendor_list_raw,
+        uncategorized_purchases,
     ) = await asyncio.gather(
         safe_fetch(client.get_profit_loss(period_from, period_to), "profit_loss", {}),
         safe_fetch(client.get_balance_sheet(period_to), "balance_sheet", {}),
@@ -304,6 +305,7 @@ async def run_assessment(
         safe_fetch(client._query("SELECT * FROM Item MAXRESULTS 500"), "items", []),
         safe_fetch(client.get_employee_list(), "employees", []),
         safe_fetch(client._query("SELECT * FROM Vendor WHERE Active = true MAXRESULTS 500"), "vendors", []),
+        safe_fetch(client.get_uncategorized_transactions(), "uncategorized_purchases", []),
     )
 
     # ── Pre-process data ───────────────────────────────────────────────────────
@@ -443,35 +445,56 @@ async def run_assessment(
                 "Auto adjustments only appear after reconciliation is initiated."
             )
 
-        # Column R — bank feed connected: check FeedAccountType field from QBO Account entity
+        # Column R — bank feed connected
+        # QBO returns FeedAccountType when bank feed is active; also check BankNum as fallback.
         feed_type = acct.get("FeedAccountType", "") or ""
-        if feed_type:
-            ws_bank[f"R{i}"].value = f"Yes — connected ({feed_type})"
+        bank_num = acct.get("BankNum", "") or ""
+        # Some QBO versions return ConnectionStatus instead of FeedAccountType
+        conn_status = acct.get("ConnectionStatus", "") or ""
+        feed_connected = bool(feed_type) or conn_status.upper() in ("ACTIVE", "CONNECTED")
+
+        if feed_connected:
+            feed_label = feed_type or conn_status or "active"
+            ws_bank[f"R{i}"].value = f"Yes — bank feed connected ({feed_label})"
+        elif bank_num:
+            ws_bank[f"R{i}"].value = (
+                f"Not confirmed — account ending {bank_num} found but no live feed detected in API. "
+                "Verify in QBO Banking tab > Manage Connections."
+            )
         else:
-            # Also check if account has a BankNum (suggests manual import rather than live feed)
-            bank_num = acct.get("BankNum", "") or ""
-            if bank_num:
-                ws_bank[f"R{i}"].value = (
-                    f"Not connected via live feed (account ends {bank_num}). "
-                    "Set up bank feed in QBO Banking > Connect Account."
-                )
-            else:
-                ws_bank[f"R{i}"].value = (
-                    "Not connected — no bank feed detected. "
-                    "Set up in QBO Banking tab > Connect Account."
-                )
+            ws_bank[f"R{i}"].value = (
+                "Not connected or unknown — verify in QBO Banking tab > Connect Account."
+            )
 
         # Column W — old transactions in bank feeds window
-        # If feed is not connected, this is N/A; if connected, remind to review For Review tab
-        if feed_type:
+        if feed_connected:
+            uncat_count = len(uncategorized_purchases) if uncategorized_purchases else None
+            if uncat_count is not None and uncat_count > 0:
+                ws_bank[f"W{i}"].value = (
+                    f"{uncat_count} uncategorized transaction(s) found (purchases with no account assigned). "
+                    "Review and categorize in the QBO Banking 'For Review' tab — "
+                    "unreviewed items skew expense reporting."
+                )
+            elif uncat_count == 0:
+                ws_bank[f"W{i}"].value = (
+                    "No uncategorized purchases detected. "
+                    "Review the 'For Review' tab in QBO Banking to confirm all downloaded "
+                    "transactions have been matched or categorized."
+                )
+            else:
+                ws_bank[f"W{i}"].value = (
+                    "Review the 'For Review' tab in QBO Banking — categorize or match any "
+                    "transactions older than 30 days. Unreviewed items cause reporting gaps."
+                )
+        elif bank_num:
             ws_bank[f"W{i}"].value = (
-                "Review the 'For Review' tab in QBO Banking — look for transactions "
-                "older than 30 days that have not been categorized or matched."
+                "Connect bank feed to enable automatic transaction import. "
+                "Currently requires manual entry or CSV upload."
             )
         else:
             ws_bank[f"W{i}"].value = (
-                "N/A — no bank feed connected. Connect bank feed first, "
-                "then review 'For Review' tab for old unreviewed transactions."
+                "No bank feed — set up connection in QBO Banking > Connect Account "
+                "to enable automatic transaction import and review."
             )
 
     if bank_accounts:
@@ -512,6 +535,14 @@ async def run_assessment(
         if udf_total > 0:
             banking_issues.append(f"Undeposited Funds balance of ${udf_total:,.2f} — review and clear")
             banking_summary += f"\n\nUndeposited Funds: ${udf_total:,.2f} outstanding — review and deposit or void stale items."
+
+    if uncategorized_purchases is not None:
+        uncat_count = len(uncategorized_purchases)
+        if uncat_count > 0:
+            banking_issues.append(f"{uncat_count} uncategorized purchase(s) with no account assigned (For Review)")
+            banking_summary += f"\n\nFor Review: {uncat_count} uncategorized transaction(s) found — categorize in QBO Banking > For Review tab."
+        else:
+            banking_summary += "\n\nFor Review: No uncategorized purchases detected — For Review tab appears clear."
 
     ws_bank["A11"].value = banking_summary
 
@@ -702,7 +733,9 @@ async def run_assessment(
     _set_pl_finding(ws_pl, 25, "OK")
 
     # J26 — Uncategorized expenses
-    uncat_exp = [r for r in _find_rows_matching(pl_rows, "uncategorized expense", "uncategorized") if abs(r["amount"]) > 0.01]
+    # Only match "uncategorized expense" exactly — "uncategorized" alone is too broad
+    # and would false-positive match "Uncategorized Income" rows already checked above.
+    uncat_exp = [r for r in _find_rows_matching(pl_rows, "uncategorized expense") if abs(r["amount"]) > 0.01]
     if uncat_exp:
         total_ue = sum(r["amount"] for r in uncat_exp)
         _set_pl_finding(ws_pl, 26, "clean up needed",
@@ -1472,9 +1505,37 @@ async def run_assessment(
     if uses_sales_tax:
         st_bal = sum(a.get("CurrentBalance", 0) for a in st_payable_accts)
         st_names = ", ".join(a.get("Name", "") for a in st_payable_accts[:3])
+
+        # Detect likely overdue: if there's a positive balance and the period end is
+        # more than 30 days in the past, the remittance window has likely passed.
+        from datetime import date as _st_date_cls
+        try:
+            period_end_date = _st_date_cls.fromisoformat(period_to[:10])
+            days_since_period = (_st_date_cls.today() - period_end_date).days
+        except Exception:
+            days_since_period = 0
+
+        if st_bal > 0.01 and days_since_period > 30:
+            overdue_flag = (
+                f"OVERDUE LIKELY — Sales Tax Payable balance is ${st_bal:,.2f} "
+                f"and the period ended {days_since_period} days ago. "
+                "The remittance window has likely passed. File and pay immediately to avoid penalties."
+            )
+            issues_found.append(f"Sales Tax possibly overdue: ${st_bal:,.2f} outstanding, period ended {days_since_period} days ago")
+        elif st_bal > 0.01:
+            overdue_flag = (
+                f"Sales Tax Payable balance is ${st_bal:,.2f}. "
+                "Confirm that remittance has been filed or is scheduled before the due date."
+            )
+        else:
+            overdue_flag = (
+                f"Sales Tax Payable balance is ${st_bal:,.2f} — appears current. "
+                "Verify in QBO Sales Tax Center that all filings are up to date."
+            )
+
         ws_st["A10"].value = (
-            f"Sales Tax Payable accounts found: {st_names}. "
-            f"Current balance: ${st_bal:,.2f}. "
+            f"Sales Tax Payable accounts found: {st_names}.\n"
+            f"{overdue_flag}\n"
             "Verify client is using the QBO Sales Tax Center for all tracking and remittance. "
             "Confirm remittance schedule aligns with state requirements."
         )
@@ -1484,6 +1545,8 @@ async def run_assessment(
             "Ensure correct tax rates are applied to taxable products/services",
             "Review prior period sales tax returns for accuracy vs QBO reports",
         ]
+        if st_bal > 0.01 and days_since_period > 30:
+            st_work.insert(0, f"URGENT: File and pay overdue sales tax — ${st_bal:,.2f} outstanding, {days_since_period} days since period end")
     else:
         ws_st["A10"].value = (
             "No sales tax accounts detected in Chart of Accounts. "
