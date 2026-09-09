@@ -340,8 +340,9 @@ async def run_assessment(
     # ══════════════════════════════════════════════════════════════════════════
     ws_client = wb["Client info"]
     _client_display = client_name or "Client Name Not Provided"
+    # A1:J2 is a merged cell — writing to A1 fills the entire merged region.
+    # The Report tab formula ='Client info'!A2 reads from this same merged cell.
     ws_client["A1"].value = _client_display
-    ws_client["A2"].value = _client_display  # Report tab references ='Client info'!A2
     ws_client["J4"].value = period_label
     ws_client["J5"].value = accounting_method
     ws_client["J6"].value = tax_org_type or "Not specified"
