@@ -191,9 +191,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             },
             {
                 "pool_classes": ["Smithsonian", "Festival del Platano"],
-                "waterfall": [
-                    {"name": "City of Miami District 1:City of Miami District 1- MFE Funds", "annual_budget": 200000.00},
-                ],
+                "waterfall": [],   # No grant assigned → goes to Pending Allocations Grant
             },
         ],
         "dental_vision_employer": 0.00,
