@@ -399,7 +399,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             dental = profile.get("dental_vision_employer", 0.0)
             total_cost = emp["gross"] + emp["employer_taxes"] + emp["health_allowance"] + dental
 
-            period_payday = period.get("payday", "")
+            period_payday = period.get("payday") or ""
 
             # ── Step 1: calculate dollar amount per class ──────────────────
             # Use period_classes override if payday falls within a defined range
