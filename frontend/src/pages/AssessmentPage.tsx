@@ -22,6 +22,8 @@ export function AssessmentPage() {
   const [accountingMethod, setAccountingMethod] = useState('Accrual')
   const [qboVersion, setQboVersion] = useState('Plus')
   const [taxOrgType, setTaxOrgType] = useState('')
+  const [taxBasis, setTaxBasis] = useState('Accrual')
+  const [taxYear, setTaxYear] = useState('Calendar Year')
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +48,8 @@ export function AssessmentPage() {
             accounting_method: accountingMethod,
             qbo_version: qboVersion,
             tax_org_type: taxOrgType,
+            tax_basis: taxBasis,
+            tax_year: taxYear,
           },
           responseType: 'blob',
         },
@@ -176,6 +180,31 @@ export function AssessmentPage() {
                   <option value="Nonprofit (Form 990)">Nonprofit (Form 990)</option>
                   <option value="LLC (Disregarded Entity)">LLC (Disregarded Entity)</option>
                 </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-surface-600 mb-1.5">Tax Basis</label>
+                  <select
+                    className="input"
+                    value={taxBasis}
+                    onChange={e => setTaxBasis(e.target.value)}
+                  >
+                    <option value="Accrual">Accrual</option>
+                    <option value="Cash">Cash</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-surface-600 mb-1.5">Tax Year</label>
+                  <select
+                    className="input"
+                    value={taxYear}
+                    onChange={e => setTaxYear(e.target.value)}
+                  >
+                    <option value="Calendar Year">Calendar Year</option>
+                    <option value="Fiscal Year">Fiscal Year</option>
+                  </select>
+                </div>
               </div>
 
               <button

@@ -255,6 +255,8 @@ async def run_assessment(
     accounting_method: str = Query("Accrual", description="Accrual or Cash"),
     qbo_version: str = Query("Plus", description="QBO plan tier"),
     tax_org_type: str = Query("", description="Tax org type e.g. S-Corp, LLC"),
+    tax_basis: str = Query("Accrual", description="Tax basis: Cash or Accrual"),
+    tax_year: str = Query("Calendar Year", description="Tax year: Calendar Year or Fiscal Year"),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
@@ -333,11 +335,45 @@ async def run_assessment(
     # SHEET: Client info
     # ══════════════════════════════════════════════════════════════════════════
     ws_client = wb["Client info"]
-    ws_client["A1"].value = client_name or "Client Name Not Provided"
+    _client_display = client_name or "Client Name Not Provided"
+    ws_client["A1"].value = _client_display
+    ws_client["A2"].value = _client_display  # Report tab references ='Client info'!A2
     ws_client["J4"].value = period_label
     ws_client["J5"].value = accounting_method
     ws_client["J6"].value = tax_org_type or "Not specified"
+    ws_client["J7"].value = tax_basis
+    ws_client["J8"].value = tax_year
+
+    # J10 — QBO version name
     ws_client["J10"].value = f"QuickBooks Online {qbo_version}"
+
+    # J11 — Is the client using the right QBO version?
+    _version_comment: str
+    if qbo_version in ("Advanced",):
+        _version_comment = (
+            f"QBO Advanced is appropriate if the client needs advanced reporting, custom roles, "
+            "or more than 5 users. Confirm the client actively uses Advanced features; "
+            "otherwise consider downgrading to Plus to reduce cost."
+        )
+    elif qbo_version in ("Plus",):
+        _version_comment = (
+            "QBO Plus is appropriate for businesses that need class/location tracking, "
+            "inventory, or project profitability. Recommended for most small businesses "
+            "with more complex reporting needs."
+        )
+    elif qbo_version in ("Essentials",):
+        _version_comment = (
+            "QBO Essentials covers basic income/expense tracking, AP, and multi-user access. "
+            "If the client needs inventory tracking, class tracking, or project profitability, "
+            "consider upgrading to QBO Plus."
+        )
+    else:  # Simple Start
+        _version_comment = (
+            "QBO Simple Start is the most basic tier — single user, income/expense only. "
+            "If the client needs AP (bill tracking), multi-user access, or class tracking, "
+            "upgrade to Essentials or Plus."
+        )
+    ws_client["J11"].value = _version_comment
 
     # ══════════════════════════════════════════════════════════════════════════
     # SHEET: Banking
