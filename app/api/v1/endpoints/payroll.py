@@ -473,7 +473,7 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
             # Build per-class breakdown dict
             class_breakdown: dict[str, dict] = {}
             for cls, amt in class_amounts.items():
-                pct = profile["classes"][cls]
+                pct = active_classes[cls]   # use the period-active % (may differ from profile default)
                 class_breakdown[cls] = {
                     "pct":             pct,
                     "amount":          round(amt, 2),
