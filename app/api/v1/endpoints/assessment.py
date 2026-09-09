@@ -318,6 +318,31 @@ async def run_assessment(
     bank_accounts = [a for a in active_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
     total_account_count = len(active_accounts)
 
+    # ── Fetch enriched individual account details + BankTransaction For Review ──
+    # SELECT * FROM Account via query doesn't return LastReconcileDate,
+    # FeedAccountType, or ConnectionStatus — need individual GETs.
+    async def _get_full_account(acct: dict) -> dict:
+        try:
+            resp = await client._get(f"account/{acct['Id']}")
+            # QBO wraps the entity: {"Account": {...}}
+            full = resp.get("Account", resp) if isinstance(resp, dict) else acct
+            # Merge so we keep any COA fields not in the individual response
+            merged = {**acct, **full}
+            return merged
+        except Exception:
+            return acct
+
+    bank_acct_details_raw = await asyncio.gather(
+        *[_get_full_account(a) for a in bank_accounts[:6]],
+        safe_fetch(client._query("SELECT * FROM BankTransaction MAXRESULTS 500"), "bank_txns", []),
+    )
+    # Last item is the BankTransaction list; the rest are enriched accounts
+    bank_transactions_for_review = bank_acct_details_raw[-1] if bank_acct_details_raw else []
+    enriched_bank_accounts = list(bank_acct_details_raw[:-1]) if len(bank_acct_details_raw) > 1 else bank_accounts
+
+    # Replace bank_accounts with enriched version so the rest of the code sees full data
+    bank_accounts = enriched_bank_accounts if enriched_bank_accounts else bank_accounts
+
     has_payroll_liability = any(
         "payroll" in (a.get("Name", "") + a.get("AccountSubType", "")).lower()
         for a in active_accounts
@@ -468,23 +493,27 @@ async def run_assessment(
 
         # Column W — old transactions in bank feeds window
         if feed_connected:
-            uncat_count = len(uncategorized_purchases) if uncategorized_purchases else None
-            if uncat_count is not None and uncat_count > 0:
+            # BankTransaction query gives us pending/for-review items
+            btxn_count = len(bank_transactions_for_review) if bank_transactions_for_review else None
+            uncat_count = len(uncategorized_purchases) if uncategorized_purchases else 0
+            total_pending = (btxn_count or 0) + uncat_count
+            if btxn_count is not None and btxn_count > 0:
                 ws_bank[f"W{i}"].value = (
-                    f"{uncat_count} uncategorized transaction(s) found (purchases with no account assigned). "
-                    "Review and categorize in the QBO Banking 'For Review' tab — "
-                    "unreviewed items skew expense reporting."
+                    f"{btxn_count} transaction(s) pending in the 'For Review' tab. "
+                    f"Also {uncat_count} purchase(s) with no account assigned. "
+                    "Review, match, or categorize all items in QBO Banking > For Review — "
+                    "unreviewed transactions are excluded from reports."
                 )
-            elif uncat_count == 0:
+            elif uncat_count > 0:
                 ws_bank[f"W{i}"].value = (
-                    "No uncategorized purchases detected. "
-                    "Review the 'For Review' tab in QBO Banking to confirm all downloaded "
-                    "transactions have been matched or categorized."
+                    f"{uncat_count} uncategorized purchase(s) found (no expense account assigned). "
+                    "Categorize in QBO Banking 'For Review' tab — "
+                    "these are excluded from P&L until categorized."
                 )
             else:
                 ws_bank[f"W{i}"].value = (
-                    "Review the 'For Review' tab in QBO Banking — categorize or match any "
-                    "transactions older than 30 days. Unreviewed items cause reporting gaps."
+                    "For Review tab appears clear — no pending or uncategorized transactions detected. "
+                    "Confirm in QBO Banking tab."
                 )
         elif bank_num:
             ws_bank[f"W{i}"].value = (
@@ -536,13 +565,18 @@ async def run_assessment(
             banking_issues.append(f"Undeposited Funds balance of ${udf_total:,.2f} — review and clear")
             banking_summary += f"\n\nUndeposited Funds: ${udf_total:,.2f} outstanding — review and deposit or void stale items."
 
-    if uncategorized_purchases is not None:
-        uncat_count = len(uncategorized_purchases)
-        if uncat_count > 0:
-            banking_issues.append(f"{uncat_count} uncategorized purchase(s) with no account assigned (For Review)")
-            banking_summary += f"\n\nFor Review: {uncat_count} uncategorized transaction(s) found — categorize in QBO Banking > For Review tab."
-        else:
-            banking_summary += "\n\nFor Review: No uncategorized purchases detected — For Review tab appears clear."
+    # For Review / pending bank transactions
+    _btxn_count = len(bank_transactions_for_review) if bank_transactions_for_review else 0
+    _uncat_count = len(uncategorized_purchases) if uncategorized_purchases else 0
+    if _btxn_count > 0 or _uncat_count > 0:
+        _for_review_msg = f"For Review: {_btxn_count} bank transaction(s) pending in For Review tab"
+        if _uncat_count > 0:
+            _for_review_msg += f" + {_uncat_count} purchase(s) with no expense account assigned"
+        _for_review_msg += " — categorize all items before running reports."
+        banking_issues.append(_for_review_msg)
+        banking_summary += f"\n\n{_for_review_msg}"
+    else:
+        banking_summary += "\n\nFor Review: No pending or uncategorized transactions detected — confirm in QBO Banking tab."
 
     ws_bank["A11"].value = banking_summary
 
