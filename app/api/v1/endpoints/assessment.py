@@ -391,32 +391,83 @@ async def run_assessment(
     unreconciled_accounts: list[str] = []
     old_rec_accounts: list[str] = []
 
+    from datetime import date as _date_cls
     for i, acct in enumerate(bank_accounts[:5], start=4):
         name = acct.get("Name", "")
         ws_bank[f"A{i}"].value = name
         last_rec = acct.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
+        never_reconciled = not bool(last_rec)
+
         if last_rec:
             # Format YYYY-MM-DD → MM/DD/YYYY
             try:
-                from datetime import date
-                d = date.fromisoformat(last_rec)
+                d = _date_cls.fromisoformat(last_rec)
                 ws_bank[f"G{i}"].value = d.strftime("%m/%d/%Y")
-                # Flag if reconciled more than 45 days ago
-                days_since = (date.today() - d).days
+                days_since = (_date_cls.today() - d).days
                 if days_since > 45:
                     old_rec_accounts.append(f"{name} (last: {d.strftime('%m/%d/%Y')})")
+                # Column J — uncleared items: if reconciled, we know there may be items after last rec date
+                ws_bank[f"J{i}"].value = (
+                    f"Possible — last reconciled {days_since} days ago. "
+                    "Run Reconcile > History to review uncleared items."
+                    if days_since > 30 else
+                    "Likely none — reconciled within last 30 days. Verify in QBO Reconcile > History."
+                )
+                # Column O — auto adjustments: only appear in reconciliation history
+                ws_bank[f"O{i}"].value = (
+                    "Check reconciliation history in QBO — accounts reconciled >30 days ago "
+                    "may have auto adjustments. Go to Accounting > Reconcile > History."
+                    if days_since > 30 else
+                    "Review reconciliation history in QBO > Accounting > Reconcile > History by Account."
+                )
             except Exception:
                 ws_bank[f"G{i}"].value = last_rec
+                ws_bank[f"J{i}"].value = "Review in QBO Reconcile > History by Account"
+                ws_bank[f"O{i}"].value = "Review in QBO Reconcile > History by Account"
         else:
             ws_bank[f"G{i}"].value = "Never reconciled"
             unreconciled_accounts.append(name)
+            # Column J — no reconciliation = no cleared/uncleared tracking exists yet
+            ws_bank[f"J{i}"].value = (
+                "N/A — account has never been reconciled. "
+                "All transactions are uncleared. Establish opening balance and begin reconciling."
+            )
+            # Column O — no reconciliation = no auto adjustments possible
+            ws_bank[f"O{i}"].value = (
+                "N/A — no reconciliation performed yet. "
+                "Auto adjustments only appear after reconciliation is initiated."
+            )
 
-        ws_bank[f"J{i}"].value = "Review in QBO Reconcile"
-        ws_bank[f"O{i}"].value = "Review in QBO Reconcile"
-        cc_types = ("CreditCard", "Credit Card")
-        is_cc = acct.get("AccountType") == "Credit Card" or acct.get("AccountSubType") in cc_types
-        ws_bank[f"R{i}"].value = "Review in QBO Banking"
-        ws_bank[f"W{i}"].value = "Review in QBO Banking"
+        # Column R — bank feed connected: check FeedAccountType field from QBO Account entity
+        feed_type = acct.get("FeedAccountType", "") or ""
+        if feed_type:
+            ws_bank[f"R{i}"].value = f"Yes — connected ({feed_type})"
+        else:
+            # Also check if account has a BankNum (suggests manual import rather than live feed)
+            bank_num = acct.get("BankNum", "") or ""
+            if bank_num:
+                ws_bank[f"R{i}"].value = (
+                    f"Not connected via live feed (account ends {bank_num}). "
+                    "Set up bank feed in QBO Banking > Connect Account."
+                )
+            else:
+                ws_bank[f"R{i}"].value = (
+                    "Not connected — no bank feed detected. "
+                    "Set up in QBO Banking tab > Connect Account."
+                )
+
+        # Column W — old transactions in bank feeds window
+        # If feed is not connected, this is N/A; if connected, remind to review For Review tab
+        if feed_type:
+            ws_bank[f"W{i}"].value = (
+                "Review the 'For Review' tab in QBO Banking — look for transactions "
+                "older than 30 days that have not been categorized or matched."
+            )
+        else:
+            ws_bank[f"W{i}"].value = (
+                "N/A — no bank feed connected. Connect bank feed first, "
+                "then review 'For Review' tab for old unreviewed transactions."
+            )
 
     if bank_accounts:
         acct_lines = []
