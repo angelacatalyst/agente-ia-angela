@@ -292,6 +292,8 @@ async def run_assessment(
         ap_aging_report,
         undeposited_funds,
         items_list,
+        employee_list,
+        vendor_list_raw,
     ) = await asyncio.gather(
         safe_fetch(client.get_profit_loss(period_from, period_to), "profit_loss", {}),
         safe_fetch(client.get_balance_sheet(period_to), "balance_sheet", {}),
@@ -300,6 +302,8 @@ async def run_assessment(
         safe_fetch(client.get_ap_aging(), "ap_aging", {}),
         safe_fetch(client.get_undeposited_funds(), "undeposited_funds", []),
         safe_fetch(client._query("SELECT * FROM Item MAXRESULTS 500"), "items", []),
+        safe_fetch(client.get_employee_list(), "employees", []),
+        safe_fetch(client._query("SELECT * FROM Vendor WHERE Active = true MAXRESULTS 500"), "vendors", []),
     )
 
     # ── Pre-process data ───────────────────────────────────────────────────────
@@ -1175,8 +1179,22 @@ async def run_assessment(
     else:
         _set_arap_finding(ws_arap, 7, "OK")
 
-    ws_arap["J8"].value = "Review needed"
-    ws_arap["J9"].value = "Review needed"
+    # J8 — payment applied with no invoice (appears as credit/negative in AR aging)
+    if ar_neg:
+        _set_arap_finding(ws_arap, 8, "clean up needed",
+                          num_txns=str(len(ar_neg)),
+                          amount=f"${abs(sum(r['amount'] for r in ar_neg)):,.2f}")
+        ar_issues.append(f"{len(ar_neg)} customer payment(s) with no invoice to apply to")
+    else:
+        _set_arap_finding(ws_arap, 8, "OK")
+
+    # J9 — overpayment (same indicator: negative AR balance = overpayment or unapplied credit)
+    if ar_neg:
+        _set_arap_finding(ws_arap, 9, "clean up needed",
+                          num_txns=str(len(ar_neg)),
+                          amount=f"${abs(sum(r['amount'] for r in ar_neg)):,.2f}")
+    else:
+        _set_arap_finding(ws_arap, 9, "OK")
 
     if ar_zero:
         _set_arap_finding(ws_arap, 11, "clean up needed", num_txns=str(len(ar_zero)))
@@ -1230,8 +1248,22 @@ async def run_assessment(
     else:
         _set_arap_finding(ws_arap, 32, "OK")
 
-    ws_arap["J33"].value = "Review needed"
-    ws_arap["J34"].value = "Review needed"
+    # J33 — payment applied with no bill (debit/negative in AP aging)
+    if ap_neg:
+        _set_arap_finding(ws_arap, 33, "clean up needed",
+                          num_txns=str(len(ap_neg)),
+                          amount=f"${abs(sum(r['amount'] for r in ap_neg)):,.2f}")
+        ap_issues.append(f"{len(ap_neg)} vendor payment(s) with no bill to apply to")
+    else:
+        _set_arap_finding(ws_arap, 33, "OK")
+
+    # J34 — overpayment to vendor (same indicator: negative AP balance)
+    if ap_neg:
+        _set_arap_finding(ws_arap, 34, "clean up needed",
+                          num_txns=str(len(ap_neg)),
+                          amount=f"${abs(sum(r['amount'] for r in ap_neg)):,.2f}")
+    else:
+        _set_arap_finding(ws_arap, 34, "OK")
 
     if ap_zero:
         _set_arap_finding(ws_arap, 36, "clean up needed", num_txns=str(len(ap_zero)))
@@ -1350,10 +1382,47 @@ async def run_assessment(
     has_payroll = bool(payroll_exp_accts) or has_payroll_liability
 
     ws_pay["J4"].value = "Yes" if has_payroll else "No"
-    ws_pay["J5"].value = "Unknown — check QBO Payroll or HR records"
-    ws_pay["J6"].value = "Unknown — check vendor list for 1099 contractors"
-    ws_pay["J7"].value = "Unknown — review payroll schedule with client"
-    ws_pay["J8"].value = "Unknown — confirm payroll processor with client"
+
+    # J5 — number of employees (from QBO Employee list)
+    active_employees = [e for e in (employee_list or []) if e.get("Active", True)]
+    if active_employees:
+        ws_pay["J5"].value = f"{len(active_employees)} active employee(s) in QBO"
+    elif has_payroll:
+        ws_pay["J5"].value = "Payroll accounts detected but no employees found in QBO Employee list — confirm with client"
+    else:
+        ws_pay["J5"].value = "No employees found in QBO"
+
+    # J6 — number of 1099 subcontractors (vendors flagged as 1099 in QBO)
+    vendors_1099 = [v for v in (vendor_list_raw or []) if v.get("Vendor1099", False)]
+    if vendors_1099:
+        names_1099 = ", ".join(v.get("DisplayName", v.get("CompanyName", "")) for v in vendors_1099[:5])
+        ws_pay["J6"].value = (
+            f"{len(vendors_1099)} 1099 contractor(s) flagged in QBO: {names_1099}"
+            + (f" (and {len(vendors_1099) - 5} more)" if len(vendors_1099) > 5 else "")
+        )
+    else:
+        ws_pay["J6"].value = "No vendors flagged as 1099 contractors in QBO — confirm with client if subcontractors are used"
+
+    # J7 — payroll type/frequency (infer from payroll accounts or expense patterns)
+    payroll_salary = any("salary" in a.get("Name", "").lower() for a in active_accounts)
+    payroll_hourly = any("hourly" in a.get("Name", "").lower() or "wage" in a.get("Name", "").lower() for a in active_accounts)
+    if payroll_salary and payroll_hourly:
+        ws_pay["J7"].value = "Mix of salaried and hourly accounts found in COA — confirm payroll frequency (bi-weekly, semi-monthly, etc.) with client"
+    elif payroll_salary:
+        ws_pay["J7"].value = "Salaried payroll accounts found — confirm frequency (monthly, semi-monthly, bi-weekly) with client"
+    elif payroll_hourly:
+        ws_pay["J7"].value = "Hourly/wage payroll accounts found — confirm frequency with client"
+    else:
+        ws_pay["J7"].value = "Payroll type/frequency not determinable from COA — confirm with client"
+
+    # J8 — payroll processor (check if QBO payroll liabilities exist which suggest QBO Payroll)
+    qbo_payroll_accounts = [a for a in active_accounts if "payroll" in a.get("Name", "").lower() and a.get("AccountType") == "Other Current Liability"]
+    if qbo_payroll_accounts and active_employees:
+        ws_pay["J8"].value = "QBO Payroll likely in use — payroll liability accounts and employee records found in QBO"
+    elif has_payroll and not active_employees:
+        ws_pay["J8"].value = "Third-party payroll service likely (e.g., Gusto, ADP, Paychex) — payroll expenses recorded but no employees in QBO Payroll. Confirm with client."
+    else:
+        ws_pay["J8"].value = "Payroll processor not confirmed — verify with client (QBO Payroll, Gusto, ADP, Paychex, or manual)"
 
     if has_payroll and has_payroll_liability:
         ws_pay["J9"].value = "Yes — payroll expense and liability accounts found in COA"
@@ -1395,7 +1464,7 @@ async def run_assessment(
     uses_sales_tax = bool(st_payable_accts) or has_sales_tax
 
     ws_st["J4"].value = "Yes" if uses_sales_tax else "No"
-    ws_st["J5"].value = "Unknown — confirm remittance frequency with client"
+    ws_st["J5"].value = "Confirm remittance frequency with client (monthly, quarterly, or annually based on state requirements)"
     ws_st["J6"].value = accounting_method
     ws_st["J7"].value = "Yes" if uses_sales_tax else "No"
 
