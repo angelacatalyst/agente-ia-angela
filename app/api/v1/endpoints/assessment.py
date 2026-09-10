@@ -328,30 +328,84 @@ async def run_assessment(
     bank_accounts = [a for a in active_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
     total_account_count = len(active_accounts)
 
-    # ── Fetch enriched individual account details + BankTransaction For Review ──
-    # SELECT * FROM Account via query doesn't return LastReconcileDate,
-    # FeedAccountType, or ConnectionStatus — need individual GETs.
+    # ── Secondary banking fetches: individual account GETs + recon reports + BankTransaction ──
+    # The bulk COA query (SELECT * FROM Account) does NOT return:
+    #   LastReconcileDate, FeedAccountType, ConnectionStatus
+    # We need individual GETs per account and ReconciliationDetail reports.
+
     async def _get_full_account(acct: dict) -> dict:
+        """Fetch the full Account entity to get LastReconcileDate, FeedAccountType, etc."""
         try:
             resp = await client._get(f"account/{acct['Id']}")
-            # QBO wraps the entity: {"Account": {...}}
             full = resp.get("Account", resp) if isinstance(resp, dict) else acct
-            # Merge so we keep any COA fields not in the individual response
-            merged = {**acct, **full}
-            return merged
+            return {**acct, **full}
         except Exception:
             return acct
 
-    bank_acct_details_raw = await asyncio.gather(
-        *[_get_full_account(a) for a in bank_accounts[:6]],
-        safe_fetch(client._query("SELECT * FROM BankTransaction MAXRESULTS 500"), "bank_txns", []),
-    )
-    # Last item is the BankTransaction list; the rest are enriched accounts
-    bank_transactions_for_review = bank_acct_details_raw[-1] if bank_acct_details_raw else []
-    enriched_bank_accounts = list(bank_acct_details_raw[:-1]) if len(bank_acct_details_raw) > 1 else bank_accounts
+    async def _get_recon_report(acct: dict) -> dict:
+        """Fetch ReconciliationDetail report for an account to detect last rec date + adjustments."""
+        try:
+            return await client.get_reconciliation_report(acct["Id"])
+        except Exception:
+            return {}
 
-    # Replace bank_accounts with enriched version so the rest of the code sees full data
+    _n_bank = min(6, len(bank_accounts))
+    # Build all tasks: account GETs, recon reports, then BankTransaction query
+    _bank_tasks = (
+        [_get_full_account(a) for a in bank_accounts[:_n_bank]]
+        + [_get_recon_report(a) for a in bank_accounts[:_n_bank]]
+        + [safe_fetch(client._query("SELECT * FROM BankTransaction MAXRESULTS 500"), "bank_txns", [])]
+    )
+    _bank_results = await asyncio.gather(*_bank_tasks)
+
+    enriched_bank_accounts = list(_bank_results[:_n_bank]) if _n_bank > 0 else bank_accounts
+    recon_reports = list(_bank_results[_n_bank: _n_bank * 2])
+    bank_transactions_for_review = _bank_results[-1] if _bank_tasks else []
+
+    # Replace bank_accounts with enriched data
     bank_accounts = enriched_bank_accounts if enriched_bank_accounts else bank_accounts
+
+    # ── Parse each reconciliation report ─────────────────────────────────────
+    def _parse_recon_report(report: dict) -> dict:
+        """Extract last reconciliation date, uncleared tx count, and auto-adjustment flag."""
+        result: dict = {"last_rec_date": None, "uncleared_count": 0, "has_adjustments": False}
+        if not report or not isinstance(report, dict):
+            return result
+        header = report.get("Header", {})
+        # EndPeriod = statement end date = effective last reconciliation date
+        end_period = header.get("EndPeriod", "") or header.get("end_date", "") or ""
+        if end_period:
+            result["last_rec_date"] = end_period
+        # Walk rows to count uncleared items and detect adjustments
+        rows = report.get("Rows", {}).get("Row", [])
+        for row in rows:
+            if row.get("type") == "Section":
+                h_cols = row.get("Header", {}).get("ColData", [{}])
+                sec_name = (h_cols[0].get("value", "") if h_cols else "").lower()
+                child_rows = row.get("Rows", {}).get("Row", [])
+                if "uncleared" in sec_name:
+                    result["uncleared_count"] += sum(
+                        1 for r in child_rows if r.get("type") == "Data"
+                    )
+                if "adjustment" in sec_name or "discrepancy" in sec_name:
+                    result["has_adjustments"] = True
+        return result
+
+    recon_info_by_idx = [_parse_recon_report(r) for r in recon_reports]
+
+    # ── Group BankTransaction records by AccountRef for per-account pending count ──
+    # If BankTransaction query is supported, this gives us which accounts are connected
+    # AND how many transactions are pending review per account.
+    btxn_count_by_acct_id: dict[str, int] = {}
+    for _txn in (bank_transactions_for_review or []):
+        if not isinstance(_txn, dict):
+            continue
+        _acct_ref = _txn.get("AccountRef") or _txn.get("BankAccountRef") or {}
+        _acct_id = (_acct_ref.get("value", "") if isinstance(_acct_ref, dict) else "")
+        if _acct_id:
+            btxn_count_by_acct_id[_acct_id] = btxn_count_by_acct_id.get(_acct_id, 0) + 1
+    # Total uncategorized purchases (fallback For Review proxy)
+    _total_uncat_purchases = len(uncategorized_purchases) if uncategorized_purchases else 0
 
     has_payroll_liability = any(
         "payroll" in (a.get("Name", "") + a.get("AccountSubType", "")).lower()
@@ -435,33 +489,65 @@ async def run_assessment(
 
     from datetime import date as _date_cls
     for i, acct in enumerate(bank_accounts[:5], start=4):
+        _acct_idx = i - 4  # 0-based index into recon_info_by_idx
         name = acct.get("Name", "")
+        acct_id = acct.get("Id", "")
         ws_bank[f"A{i}"].value = name
-        last_rec = acct.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
+
+        # ── Reconciliation date: prefer individual GET field, then recon report header ──
+        _recon_info = recon_info_by_idx[_acct_idx] if _acct_idx < len(recon_info_by_idx) else {}
+        last_rec = (
+            acct.get("LastReconcileDate", "") or ""
+            or _recon_info.get("last_rec_date", "") or ""
+            or acct_rec_dates.get(name, "")
+        )
         never_reconciled = not bool(last_rec)
+        _uncleared_from_report = _recon_info.get("uncleared_count", 0)
+        _has_adjustments = _recon_info.get("has_adjustments", False)
 
         if last_rec:
-            # Format YYYY-MM-DD → MM/DD/YYYY
             try:
-                d = _date_cls.fromisoformat(last_rec)
+                d = _date_cls.fromisoformat(last_rec[:10])
                 ws_bank[f"G{i}"].value = d.strftime("%m/%d/%Y")
                 days_since = (_date_cls.today() - d).days
                 if days_since > 45:
                     old_rec_accounts.append(f"{name} (last: {d.strftime('%m/%d/%Y')})")
-                # Column J — uncleared items: if reconciled, we know there may be items after last rec date
-                ws_bank[f"J{i}"].value = (
-                    f"Possible — last reconciled {days_since} days ago. "
-                    "Run Reconcile > History to review uncleared items."
-                    if days_since > 30 else
-                    "Likely none — reconciled within last 30 days. Verify in QBO Reconcile > History."
-                )
-                # Column O — auto adjustments: only appear in reconciliation history
-                ws_bank[f"O{i}"].value = (
-                    "Check reconciliation history in QBO — accounts reconciled >30 days ago "
-                    "may have auto adjustments. Go to Accounting > Reconcile > History."
-                    if days_since > 30 else
-                    "Review reconciliation history in QBO > Accounting > Reconcile > History by Account."
-                )
+
+                # Column J — uncleared items
+                if _uncleared_from_report > 0:
+                    ws_bank[f"J{i}"].value = (
+                        f"{_uncleared_from_report} uncleared transaction(s) found in reconciliation report "
+                        f"(last reconciled {days_since} days ago). "
+                        "Review in QBO Accounting > Reconcile > History to clear old items."
+                    )
+                elif days_since > 30:
+                    ws_bank[f"J{i}"].value = (
+                        f"Possible — last reconciled {days_since} days ago. "
+                        "Run Reconcile > History to review uncleared items older than 30 days."
+                    )
+                else:
+                    ws_bank[f"J{i}"].value = (
+                        "Likely none — reconciled within last 30 days. "
+                        "Verify in QBO Accounting > Reconcile > History."
+                    )
+
+                # Column O — auto adjustments
+                if _has_adjustments:
+                    ws_bank[f"O{i}"].value = (
+                        "AUTO-ADJUSTMENT DETECTED in reconciliation history — "
+                        "investigate in QBO Accounting > Reconcile > History. "
+                        "Adjustments force the balance and mask real discrepancies."
+                    )
+                    issues_found.append(f"Reconciliation auto-adjustment detected on {name}")
+                elif days_since > 30:
+                    ws_bank[f"O{i}"].value = (
+                        f"Last reconciled {days_since} days ago — review history for any auto-adjustments. "
+                        "Go to QBO Accounting > Reconcile > History by Account."
+                    )
+                else:
+                    ws_bank[f"O{i}"].value = (
+                        "Review reconciliation history in QBO > Accounting > Reconcile > History by Account."
+                    )
             except Exception:
                 ws_bank[f"G{i}"].value = last_rec
                 ws_bank[f"J{i}"].value = "Review in QBO Reconcile > History by Account"
@@ -469,61 +555,56 @@ async def run_assessment(
         else:
             ws_bank[f"G{i}"].value = "Never reconciled"
             unreconciled_accounts.append(name)
-            # Column J — no reconciliation = no cleared/uncleared tracking exists yet
             ws_bank[f"J{i}"].value = (
                 "N/A — account has never been reconciled. "
                 "All transactions are uncleared. Establish opening balance and begin reconciling."
             )
-            # Column O — no reconciliation = no auto adjustments possible
             ws_bank[f"O{i}"].value = (
                 "N/A — no reconciliation performed yet. "
                 "Auto adjustments only appear after reconciliation is initiated."
             )
 
-        # Column R — bank feed connected
-        # QBO returns FeedAccountType when bank feed is active; also check BankNum as fallback.
+        # ── Column R — bank feed connected ───────────────────────────────────
         feed_type = acct.get("FeedAccountType", "") or ""
         bank_num = acct.get("BankNum", "") or ""
-        # Some QBO versions return ConnectionStatus instead of FeedAccountType
         conn_status = acct.get("ConnectionStatus", "") or ""
-        feed_connected = bool(feed_type) or conn_status.upper() in ("ACTIVE", "CONNECTED")
+        # Also check if BankTransaction records exist for this account (reliable proxy)
+        _pending_for_acct = btxn_count_by_acct_id.get(acct_id, 0)
+        feed_connected = (
+            bool(feed_type)
+            or conn_status.upper() in ("ACTIVE", "CONNECTED")
+            or _pending_for_acct > 0   # Has downloaded bank transactions → feed is live
+        )
 
         if feed_connected:
-            feed_label = feed_type or conn_status or "active"
-            ws_bank[f"R{i}"].value = f"Yes — bank feed connected ({feed_label})"
+            _feed_src = feed_type or conn_status or ("bank feed active — transactions downloading" if _pending_for_acct else "active")
+            ws_bank[f"R{i}"].value = f"Yes — bank feed connected ({_feed_src})"
         elif bank_num:
             ws_bank[f"R{i}"].value = (
-                f"Not confirmed — account ending {bank_num} found but no live feed detected in API. "
+                f"Not confirmed — account ending {bank_num} found but no live feed signal. "
                 "Verify in QBO Banking tab > Manage Connections."
             )
         else:
             ws_bank[f"R{i}"].value = (
-                "Not connected or unknown — verify in QBO Banking tab > Connect Account."
+                "Not detected via API — verify in QBO Banking tab > Connect Account."
             )
 
-        # Column W — old transactions in bank feeds window
+        # ── Column W — old / uncategorized transactions in bank feeds window ──
         if feed_connected:
-            # BankTransaction query gives us pending/for-review items
-            btxn_count = len(bank_transactions_for_review) if bank_transactions_for_review else None
-            uncat_count = len(uncategorized_purchases) if uncategorized_purchases else 0
-            total_pending = (btxn_count or 0) + uncat_count
-            if btxn_count is not None and btxn_count > 0:
+            if _pending_for_acct > 0:
                 ws_bank[f"W{i}"].value = (
-                    f"{btxn_count} transaction(s) pending in the 'For Review' tab. "
-                    f"Also {uncat_count} purchase(s) with no account assigned. "
-                    "Review, match, or categorize all items in QBO Banking > For Review — "
-                    "unreviewed transactions are excluded from reports."
+                    f"{_pending_for_acct} transaction(s) pending in 'For Review' tab for this account. "
+                    "Categorize or match all items — unreviewed transactions are excluded from P&L and Balance Sheet."
                 )
-            elif uncat_count > 0:
+            elif _total_uncat_purchases > 0:
                 ws_bank[f"W{i}"].value = (
-                    f"{uncat_count} uncategorized purchase(s) found (no expense account assigned). "
-                    "Categorize in QBO Banking 'For Review' tab — "
-                    "these are excluded from P&L until categorized."
+                    f"{_total_uncat_purchases} uncategorized purchase(s) found across all accounts (no expense account assigned). "
+                    "Categorize in QBO Banking > For Review tab."
                 )
             else:
                 ws_bank[f"W{i}"].value = (
-                    "For Review tab appears clear — no pending or uncategorized transactions detected. "
-                    "Confirm in QBO Banking tab."
+                    "No pending transactions detected for this account. "
+                    "Confirm For Review tab is clear in QBO Banking."
                 )
         elif bank_num:
             ws_bank[f"W{i}"].value = (
@@ -575,16 +656,25 @@ async def run_assessment(
             banking_issues.append(f"Undeposited Funds balance of ${udf_total:,.2f} — review and clear")
             banking_summary += f"\n\nUndeposited Funds: ${udf_total:,.2f} outstanding — review and deposit or void stale items."
 
-    # For Review / pending bank transactions
-    _btxn_count = len(bank_transactions_for_review) if bank_transactions_for_review else 0
-    _uncat_count = len(uncategorized_purchases) if uncategorized_purchases else 0
-    if _btxn_count > 0 or _uncat_count > 0:
-        _for_review_msg = f"For Review: {_btxn_count} bank transaction(s) pending in For Review tab"
-        if _uncat_count > 0:
-            _for_review_msg += f" + {_uncat_count} purchase(s) with no expense account assigned"
-        _for_review_msg += " — categorize all items before running reports."
-        banking_issues.append(_for_review_msg)
+    # For Review / pending bank transactions — show per-account breakdown
+    _total_btxn = sum(btxn_count_by_acct_id.values())
+    _uncat_count = _total_uncat_purchases
+    if _total_btxn > 0:
+        _per_acct_lines = [
+            f"  • {a.get('Name','')}: {btxn_count_by_acct_id.get(a.get('Id',''), 0)} pending"
+            for a in bank_accounts[:5] if btxn_count_by_acct_id.get(a.get("Id", ""), 0) > 0
+        ]
+        _for_review_msg = (
+            f"For Review: {_total_btxn} total transaction(s) pending across connected accounts:\n"
+            + "\n".join(_per_acct_lines)
+            + f"\n+ {_uncat_count} purchase(s) with no expense account assigned."
+            + "\nCategorize all items before running P&L and Balance Sheet reports."
+        )
+        banking_issues.append(f"{_total_btxn} bank transactions pending in For Review tab")
         banking_summary += f"\n\n{_for_review_msg}"
+    elif _uncat_count > 0:
+        banking_issues.append(f"{_uncat_count} uncategorized purchases (no account assigned)")
+        banking_summary += f"\n\nFor Review: {_uncat_count} purchase(s) with no account assigned — categorize in QBO Banking > For Review."
     else:
         banking_summary += "\n\nFor Review: No pending or uncategorized transactions detected — confirm in QBO Banking tab."
 
