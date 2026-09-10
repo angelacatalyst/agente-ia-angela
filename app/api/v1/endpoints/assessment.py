@@ -338,18 +338,47 @@ async def run_assessment(
 
     async def _get_full_account(acct: dict) -> dict:
         """Fetch the full Account entity to get LastReconcileDate, FeedAccountType, etc."""
+        acct_id = acct.get("Id", "?")
+        acct_name = acct.get("Name", "?")
         try:
-            resp = await client._get(f"account/{acct['Id']}")
-            full = resp.get("Account", resp) if isinstance(resp, dict) else acct
-            return {**acct, **full}
-        except Exception:
+            resp = await client._get(f"account/{acct_id}")
+            if isinstance(resp, dict):
+                full = resp.get("Account", resp)
+                enriched = {**acct, **full}
+                logger.info(
+                    "QBO account GET",
+                    account_id=acct_id,
+                    account_name=acct_name,
+                    last_rec=enriched.get("LastReconcileDate"),
+                    feed_type=enriched.get("FeedAccountType"),
+                    conn_status=enriched.get("ConnectionStatus"),
+                    fields=list(full.keys())[:20],
+                )
+                return enriched
+            return acct
+        except Exception as exc:
+            logger.warning("QBO account GET failed", account_id=acct_id, account_name=acct_name, error=str(exc))
             return acct
 
     async def _get_recon_report(acct: dict) -> dict:
         """Fetch ReconciliationDetail report for an account to detect last rec date + adjustments."""
+        acct_id = acct.get("Id", "?")
+        acct_name = acct.get("Name", "?")
         try:
-            return await client.get_reconciliation_report(acct["Id"])
-        except Exception:
+            # Try without date filter first (returns most recent reconciliation)
+            result = await client.get_reconciliation_report(acct_id)
+            end_period = (result.get("Header", {}).get("EndPeriod", "") or
+                          result.get("Header", {}).get("end_date", "") or "")
+            logger.info(
+                "QBO recon report",
+                account_id=acct_id,
+                account_name=acct_name,
+                end_period=end_period,
+                header_keys=list(result.get("Header", {}).keys()),
+            )
+            return result
+        except Exception as exc:
+            logger.warning("QBO recon report failed", account_id=acct_id, account_name=acct_name, error=str(exc))
             return {}
 
     _n_bank = min(6, len(bank_accounts))
@@ -367,6 +396,23 @@ async def run_assessment(
 
     # Replace bank_accounts with enriched data
     bank_accounts = enriched_bank_accounts if enriched_bank_accounts else bank_accounts
+
+    # Log summary of BankTransaction query
+    logger.info(
+        "QBO BankTransaction query result",
+        count=len(bank_transactions_for_review) if isinstance(bank_transactions_for_review, list) else 0,
+        sample=(bank_transactions_for_review[:2] if isinstance(bank_transactions_for_review, list) else bank_transactions_for_review),
+    )
+    # Log enriched bank account fields for debugging
+    for _ba in bank_accounts[:6]:
+        logger.info(
+            "Enriched bank account",
+            name=_ba.get("Name"),
+            id=_ba.get("Id"),
+            last_rec=_ba.get("LastReconcileDate"),
+            feed=_ba.get("FeedAccountType"),
+            conn=_ba.get("ConnectionStatus"),
+        )
 
     # ── Parse each reconciliation report ─────────────────────────────────────
     def _parse_recon_report(report: dict) -> dict:
@@ -680,6 +726,18 @@ async def run_assessment(
         banking_summary += f"\n\nFor Review: {_uncat_count} purchase(s) with no account assigned — categorize in QBO Banking > For Review."
     else:
         banking_summary += "\n\nFor Review: No pending or uncategorized transactions detected — confirm in QBO Banking tab."
+
+    # Append debug info so it's visible in the Excel file itself
+    _debug_lines = ["[API DEBUG — remove before client delivery]"]
+    for _ba in bank_accounts[:6]:
+        _debug_lines.append(
+            f"  {_ba.get('Name','?')}: LastReconcileDate={_ba.get('LastReconcileDate','—')} "
+            f"FeedAccountType={_ba.get('FeedAccountType','—')} "
+            f"ConnectionStatus={_ba.get('ConnectionStatus','—')}"
+        )
+    _debug_lines.append(f"  BankTransaction query returned: {len(bank_transactions_for_review) if isinstance(bank_transactions_for_review, list) else 0} records")
+    _debug_lines.append(f"  btxn_count_by_acct_id: {btxn_count_by_acct_id}")
+    banking_summary += "\n\n" + "\n".join(_debug_lines)
 
     ws_bank["A11"].value = banking_summary
 
