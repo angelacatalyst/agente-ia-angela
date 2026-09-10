@@ -201,20 +201,23 @@ def _set_pl_finding(
     ws: Any, row: int, finding: str,
     comment: str = "", num_txns: str = "",
     date_from: str = "", date_to: str = "", amount: str = "",
+    internal_comment: str = "",
 ) -> None:
-    """Write a P&L findings row. J=finding, L=comment, M=#txns, N=from, O=to, P=amount."""
+    """Write a P&L findings row. J=finding, L=comment, M=#txns, N=from, O=to, P=amount, R=internal."""
     ws[f"J{row}"].value = finding
-    if finding == "clean up needed":
-        if comment:
-            ws[f"L{row}"].value = comment
-        if num_txns:
-            ws[f"M{row}"].value = num_txns
-        if date_from:
-            ws[f"N{row}"].value = date_from
-        if date_to:
-            ws[f"O{row}"].value = date_to
-        if amount:
-            ws[f"P{row}"].value = amount
+    # Always write all detail columns regardless of finding type
+    if comment:
+        ws[f"L{row}"].value = comment
+    if num_txns:
+        ws[f"M{row}"].value = num_txns
+    if date_from:
+        ws[f"N{row}"].value = date_from
+    if date_to:
+        ws[f"O{row}"].value = date_to
+    if amount:
+        ws[f"P{row}"].value = amount
+    if internal_comment:
+        ws[f"R{row}"].value = internal_comment
 
 
 def _set_bs_finding(
@@ -706,53 +709,79 @@ async def run_assessment(
     ws_pl["J5"].value = period_from_mmyy
     ws_pl["K5"].value = period_to_mmyy
 
+    # ── Build section-level account lists for detailed per-row comments ───────
+    def _section_accts(section_kws: list[str]) -> list[dict]:
+        """Non-summary rows whose section matches any keyword."""
+        kws = [k.lower() for k in section_kws]
+        return [r for r in pl_rows if not r.get("is_summary") and abs(r["amount"]) > 0.01
+                and any(kw in r.get("section", "").lower() for kw in kws)]
+
+    def _acct_list(rows: list[dict], limit: int = 6) -> str:
+        return "; ".join(f"{r['name']} (${r['amount']:,.2f})" for r in rows[:limit])
+
+    income_accts = _section_accts(["income", "revenue", "sales"])
+    cogs_accts   = _section_accts(["cost of goods", "cogs", "cost of sales", "direct cost"])
+    exp_accts    = _section_accts(["expense", "expenses"])
+    other_inc_accts = [r for r in pl_rows if not r.get("is_summary") and abs(r["amount"]) > 0.01
+                       and "other income" in r.get("section", "").lower()]
+    other_exp_accts = [r for r in pl_rows if not r.get("is_summary") and abs(r["amount"]) > 0.01
+                       and "other expense" in r.get("section", "").lower()]
+
+    total_income_bal = sum(r["amount"] for r in income_accts)
+    total_cogs_bal   = abs(sum(r["amount"] for r in cogs_accts))
+    total_exp_bal    = sum(r["amount"] for r in exp_accts)
+
+    # ── INCOME SECTION ────────────────────────────────────────────────────────
+
     # J9 — Negative income balances
-    neg_income = [
-        r for r in pl_rows
-        if r["amount"] < -0.01 and not r.get("is_summary")
-        and any(kw in r["name"].lower() for kw in ["income", "revenue", "sales"])
-    ]
+    neg_income = [r for r in income_accts if r["amount"] < -0.01]
     if neg_income:
-        names = ", ".join(r["name"] for r in neg_income[:3])
         total_neg = sum(r["amount"] for r in neg_income)
         _set_pl_finding(ws_pl, 9, "clean up needed",
-                        comment=f"Negative income accounts: {names}",
+                        comment=_acct_list(neg_income),
                         num_txns=str(len(neg_income)),
                         date_from=period_from_mmyy, date_to=period_to_mmyy,
-                        amount=f"${total_neg:,.2f}")
+                        amount=f"${total_neg:,.2f}",
+                        internal_comment="Investigate negative income — may be refunds, voids, or mispostings. Reverse or reclassify as needed.")
         pl_issues.append(f"Negative income balances in {len(neg_income)} account(s)")
     else:
-        _set_pl_finding(ws_pl, 9, "OK")
+        _set_pl_finding(ws_pl, 9, "OK",
+                        comment=_acct_list(income_accts) if income_accts else "No income accounts found",
+                        amount=f"${total_income_bal:,.2f}",
+                        internal_comment=f"Reviewed {len(income_accts)} income account(s) — all balances positive.")
 
     # J10 — Uncategorized income
-    # Only match the exact "Uncategorized Income" account — NOT "Other Income" which
-    # is a legitimate QBO section for items like Grant Income, interest, etc.
     uncat_inc = [r for r in _find_rows_matching(pl_rows, "uncategorized income") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
     if uncat_inc:
         total_ui = sum(r["amount"] for r in uncat_inc)
         _set_pl_finding(ws_pl, 10, "clean up needed",
-                        comment="Uncategorized/Other Income has a balance — reclassify to proper accounts",
+                        comment=_acct_list(uncat_inc),
                         num_txns=str(len(uncat_inc)),
                         date_from=period_from_mmyy, date_to=period_to_mmyy,
-                        amount=f"${total_ui:,.2f}")
+                        amount=f"${total_ui:,.2f}",
+                        internal_comment="Reclassify all transactions in Uncategorized Income to the appropriate income account.")
         pl_issues.append("Uncategorized income balance found")
     else:
-        _set_pl_finding(ws_pl, 10, "OK")
+        _set_pl_finding(ws_pl, 10, "No",
+                        comment="Uncategorized Income account not in use",
+                        internal_comment="Confirm no transactions were posted to Uncategorized Income during the period.")
 
     # J11 — Sales of Product Income balance
-    sopi = _find_amount(pl_rows, "sales of product income")
+    sopi_rows = [r for r in _find_rows_matching(pl_rows, "sales of product income") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
+    sopi = sum(r["amount"] for r in sopi_rows)
     if abs(sopi) > 0.01:
         _set_pl_finding(ws_pl, 11, "clean up needed",
-                        comment="Sales of Product Income has a balance — verify this is appropriate for client's industry",
-                        amount=f"${sopi:,.2f}")
+                        comment=f"Sales of Product Income: ${sopi:,.2f} — verify this is appropriate for client's industry",
+                        amount=f"${sopi:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="If client is service-based, reclassify to appropriate service income account.")
         pl_issues.append("Sales of Product Income balance found — verify industry fit")
     else:
-        _set_pl_finding(ws_pl, 11, "OK")
+        _set_pl_finding(ws_pl, 11, "No",
+                        comment="Sales of Product Income account not in use",
+                        internal_comment="Account not active during this period — consistent with service-based business.")
 
     # J12 — Services income account balance
-    # Must be an exact/near-exact match for the "Services" income account, NOT any account
-    # whose name contains "services" (which would false-positive on "Legal & accounting services",
-    # "Professional services", etc.).  Only non-summary rows in the Income section qualify.
     _income_sections = {"income", "revenue", "sales"}
     svc_rows = [
         r for r in pl_rows
@@ -763,332 +792,469 @@ async def run_assessment(
     svc_amt = sum(r["amount"] for r in svc_rows)
     if abs(svc_amt) > 0.01:
         _set_pl_finding(ws_pl, 12, "clean up needed",
-                        comment="Services account has a balance — verify this is appropriate for client's industry",
-                        amount=f"${svc_amt:,.2f}")
+                        comment=f"Services account: ${svc_amt:,.2f} — verify appropriate for client's industry",
+                        amount=f"${svc_amt:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="If client is product-based, reclassify to Sales of Product Income.")
         pl_issues.append("Services account balance found — verify industry fit")
     else:
-        _set_pl_finding(ws_pl, 12, "OK")
+        _set_pl_finding(ws_pl, 12, "No",
+                        comment="Services income account not in use",
+                        internal_comment="No balance in Services income account — not applicable for this client.")
 
     # J13 — Deposits recorded as income
-    dep_income = _find_amount(pl_rows, "deposit")
+    dep_income_rows = [r for r in _find_rows_matching(pl_rows, "deposit") if abs(r["amount"]) > 0.01 and not r.get("is_summary") and "income" in r.get("section","").lower()]
+    dep_income = sum(r["amount"] for r in dep_income_rows)
     if abs(dep_income) > 0.01:
         _set_pl_finding(ws_pl, 13, "clean up needed",
-                        comment="Deposits recorded as income — reclassify to liability or proper income account",
-                        amount=f"${dep_income:,.2f}")
+                        comment=_acct_list(dep_income_rows),
+                        amount=f"${dep_income:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Reclassify deposits to liability (Deferred Revenue) or appropriate income account.")
         pl_issues.append("Deposits recorded as income")
     else:
-        _set_pl_finding(ws_pl, 13, "OK")
+        _set_pl_finding(ws_pl, 13, "No",
+                        comment="No deposit accounts found in income section",
+                        internal_comment="No sales amounts recorded as Deposits — income section is clean for this check.")
 
     # J14 — Loan proceeds as income
-    loan_inc = _find_amount(pl_rows, "loan proceeds", "loan income", "ppp loan", "eidl")
+    loan_inc_rows = [r for r in _find_rows_matching(pl_rows, "loan proceeds", "loan income", "ppp loan", "eidl") if abs(r["amount"]) > 0.01]
+    loan_inc = sum(r["amount"] for r in loan_inc_rows)
     if abs(loan_inc) > 0.01:
         _set_pl_finding(ws_pl, 14, "clean up needed",
-                        comment="Loan proceeds appear in income — reclassify to liability account",
-                        amount=f"${loan_inc:,.2f}")
+                        comment=_acct_list(loan_inc_rows),
+                        amount=f"${loan_inc:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Reclassify loan proceeds from income to a liability account (Loan Payable).")
         pl_issues.append("Loan proceeds recorded as income")
     else:
-        _set_pl_finding(ws_pl, 14, "OK")
+        _set_pl_finding(ws_pl, 14, "No",
+                        comment="No loan proceeds recorded as income",
+                        internal_comment="No loan proceeds in income section — verify directly with client if any loans were received.")
 
     # J15 — Sales tax as income deduction
-    st_inc = _find_amount(pl_rows, "sales tax", "tax collected")
+    st_inc_rows = [r for r in _find_rows_matching(pl_rows, "sales tax", "tax collected") if abs(r["amount"]) > 0.01 and not r.get("is_summary") and "income" in r.get("section","").lower()]
+    st_inc = sum(r["amount"] for r in st_inc_rows)
     if abs(st_inc) > 0.01:
         _set_pl_finding(ws_pl, 15, "clean up needed",
-                        comment="Sales tax appears as an income deduction — record in Sales Tax Payable liability instead",
-                        amount=f"${st_inc:,.2f}")
+                        comment=_acct_list(st_inc_rows),
+                        amount=f"${st_inc:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Remove sales tax from income — record in Sales Tax Payable liability and use QBO Sales Tax Center.")
         pl_issues.append("Sales tax recorded as income deduction")
     else:
-        _set_pl_finding(ws_pl, 15, "OK")
+        _set_pl_finding(ws_pl, 15, "No",
+                        comment="No sales tax deduction from income found",
+                        internal_comment="Sales tax not deducted from income — correct. Verify it is recorded in Sales Tax Payable.")
+
+    # ── COST OF GOODS SOLD SECTION ────────────────────────────────────────────
 
     # J18 — Negative COGS
-    neg_cogs = [
-        r for r in pl_rows
-        if r["amount"] < -0.01 and not r.get("is_summary")
-        and any(kw in r["name"].lower() for kw in ["cost of goods", "cogs", "cost of sales"])
-    ]
+    neg_cogs = [r for r in cogs_accts if r["amount"] < -0.01]
     if neg_cogs:
-        names = ", ".join(r["name"] for r in neg_cogs[:3])
         _set_pl_finding(ws_pl, 18, "clean up needed",
-                        comment=f"Negative COGS balances: {names}",
+                        comment=_acct_list(neg_cogs),
                         num_txns=str(len(neg_cogs)),
-                        amount=f"${sum(r['amount'] for r in neg_cogs):,.2f}")
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in neg_cogs):,.2f}",
+                        internal_comment="Investigate negative COGS — may be vendor credits, reversed purchases, or mispostings.")
         pl_issues.append("Negative COGS balances found")
     else:
-        _set_pl_finding(ws_pl, 18, "OK")
+        _set_pl_finding(ws_pl, 18, "No",
+                        comment=_acct_list(cogs_accts) if cogs_accts else "No COGS accounts found",
+                        amount=f"${total_cogs_bal:,.2f}",
+                        internal_comment=f"Reviewed {len(cogs_accts)} COGS account(s) — all balances positive.")
 
-    # J19 — Incorrectly categorized COGS
-    # IMPORTANT: only search rows that are actually IN the COGS section.
-    # Searching all pl_rows would false-positive on Insurance/Utilities in the Expenses section.
+    # J19 — Incorrectly categorized COGS (only search within COGS section)
     _cogs_section_keywords = {"cost of goods", "cogs", "cost of sales", "direct cost"}
-    cogs_only_rows = [
-        r for r in pl_rows
-        if any(kw in r.get("section", "").lower() for kw in _cogs_section_keywords)
-        and not r.get("is_summary")
-    ]
+    cogs_only_rows = [r for r in pl_rows if any(kw in r.get("section","").lower() for kw in _cogs_section_keywords) and not r.get("is_summary")]
     cogs_suspect = [r for r in _find_rows_matching(cogs_only_rows, "insurance", "utilities", "rent", "office", "admin") if abs(r["amount"]) > 0.01]
     if cogs_suspect:
-        names = ", ".join(r["name"] for r in cogs_suspect[:3])
         _set_pl_finding(ws_pl, 19, "clean up needed",
-                        comment=f"Possible expense accounts in COGS section: {names} — review categorization",
-                        num_txns=str(len(cogs_suspect)))
+                        comment=_acct_list(cogs_suspect),
+                        num_txns=str(len(cogs_suspect)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Review these accounts in COGS — insurance/rent/utilities are typically Expenses, not COGS.")
         pl_issues.append("Potential misclassification in COGS section")
     else:
-        _set_pl_finding(ws_pl, 19, "OK")
+        _set_pl_finding(ws_pl, 19, "No",
+                        comment=_acct_list(cogs_accts) if cogs_accts else "No COGS accounts found",
+                        internal_comment="No expense-type accounts (insurance, rent, utilities) found inside COGS — section looks correctly categorized.")
 
     # J20 — COGS vs income ratio check
-    total_income = _find_amount(pl_rows, "total income", "gross revenue")
-    if total_income == 0.0:
-        total_income = sum(r["amount"] for r in pl_rows if r.get("is_summary") and "income" in r["name"].lower())
-    total_cogs = _find_amount(pl_rows, "total cost of goods", "total cogs")
-    if total_income > 0 and total_cogs > total_income * 1.1:
+    total_income_for_ratio = _find_amount(pl_rows, "total income", "gross revenue")
+    if total_income_for_ratio == 0.0:
+        total_income_for_ratio = sum(r["amount"] for r in pl_rows if r.get("is_summary") and "income" in r["name"].lower() and "other" not in r["name"].lower())
+    total_cogs_for_ratio = _find_amount(pl_rows, "total cost of goods", "total cogs")
+    if total_cogs_for_ratio == 0.0:
+        total_cogs_for_ratio = total_cogs_bal
+    if total_income_for_ratio > 0 and total_cogs_for_ratio > total_income_for_ratio * 1.1:
         _set_pl_finding(ws_pl, 20, "clean up needed",
-                        comment=f"COGS (${total_cogs:,.2f}) exceeds total income (${total_income:,.2f}) — review COGS entries",
-                        amount=f"${total_cogs:,.2f}")
+                        comment=f"COGS (${total_cogs_for_ratio:,.2f}) exceeds total income (${total_income_for_ratio:,.2f})",
+                        amount=f"${total_cogs_for_ratio:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment=f"COGS is ${total_cogs_for_ratio - total_income_for_ratio:,.2f} higher than income — review all COGS entries. May indicate unrecorded income, over-expensed costs, or timing issues.")
         pl_issues.append("COGS exceeds total income")
-    elif total_income > 10000 and total_cogs == 0:
+    elif total_income_for_ratio > 10000 and total_cogs_for_ratio == 0:
         _set_pl_finding(ws_pl, 20, "clean up needed",
-                        comment="No COGS recorded despite income — verify if client has direct costs",
-                        amount="$0.00")
+                        comment="No COGS recorded despite significant income",
+                        amount="$0.00",
+                        internal_comment="Verify with client whether they have direct costs — if yes, set up COGS accounts and reclassify.")
         pl_issues.append("No COGS recorded despite income")
     else:
-        _set_pl_finding(ws_pl, 20, "OK")
+        _set_pl_finding(ws_pl, 20, "OK",
+                        comment=f"COGS ${total_cogs_for_ratio:,.2f} vs Income ${total_income_for_ratio:,.2f}",
+                        amount=f"${total_cogs_for_ratio:,.2f}",
+                        internal_comment="COGS ratio within expected range. Monitor monthly for unusual fluctuations.")
+
+    # ── EXPENSES SECTION ──────────────────────────────────────────────────────
 
     # J23 — Negative expense balances
-    neg_exp = [
-        r for r in pl_rows
-        if r["amount"] < -0.01 and not r.get("is_summary")
-        and not any(kw in r["name"].lower() for kw in ["income", "revenue", "cogs", "cost of"])
-    ]
+    neg_exp = [r for r in exp_accts if r["amount"] < -0.01]
     if neg_exp:
-        names = ", ".join(r["name"] for r in neg_exp[:3])
         _set_pl_finding(ws_pl, 23, "clean up needed",
-                        comment=f"Negative expense balances: {names}",
+                        comment=_acct_list(neg_exp),
                         num_txns=str(len(neg_exp)),
-                        amount=f"${sum(r['amount'] for r in neg_exp):,.2f}")
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in neg_exp):,.2f}",
+                        internal_comment="Negative expense balances likely indicate reversed entries, vendor credits, or overpayments. Investigate each.")
         pl_issues.append(f"Negative expense balances in {len(neg_exp)} account(s)")
     else:
-        _set_pl_finding(ws_pl, 23, "OK")
+        _set_pl_finding(ws_pl, 23, "OK",
+                        comment=f"Reviewed {len(exp_accts)} expense account(s) — all balances positive",
+                        amount=f"${total_exp_bal:,.2f}",
+                        internal_comment="No negative expense balances found.")
 
-    # J24 — Expenses higher than expected (non-payroll accounts > $50k)
-    high_exp = [
-        r for r in pl_rows
-        if r["amount"] > 50000 and not r.get("is_summary")
-        and not any(kw in r["name"].lower() for kw in ["income", "revenue", "cogs", "payroll", "salary", "wage"])
-    ]
+    # J24 — Expenses higher than expected (non-payroll accounts > $50k or notably high)
+    high_exp = [r for r in exp_accts if r["amount"] > 50000 and not any(kw in r["name"].lower() for kw in ["payroll", "salary", "wage"])]
     if high_exp:
-        names = ", ".join(f"{r['name']} (${r['amount']:,.2f})" for r in high_exp[:3])
         _set_pl_finding(ws_pl, 24, "clean up needed",
-                        comment=f"Unusually high expense accounts: {names}",
-                        num_txns=str(len(high_exp)))
+                        comment=_acct_list(high_exp),
+                        num_txns=str(len(high_exp)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Review unusually large expense accounts — verify all transactions are legitimate business expenses.")
         pl_issues.append("Some expense accounts unusually high — review")
     else:
-        _set_pl_finding(ws_pl, 24, "OK")
+        # Show top 3 expense accounts even when OK
+        top_exp = sorted(exp_accts, key=lambda r: r["amount"], reverse=True)[:3]
+        _set_pl_finding(ws_pl, 24, "OK",
+                        comment=_acct_list(top_exp) if top_exp else "No expense accounts found",
+                        amount=f"${total_exp_bal:,.2f}",
+                        internal_comment="No expense accounts exceed $50,000. Review largest accounts for reasonableness.")
 
-    # J25 — Expenses lower than expected (informational; cannot assess without benchmarks)
-    _set_pl_finding(ws_pl, 25, "OK")
+    # J25 — Expenses lower than expected
+    _set_pl_finding(ws_pl, 25, "OK",
+                    comment=f"Total expenses: ${total_exp_bal:,.2f}",
+                    internal_comment="Cannot assess low expenses without industry benchmarks — confirm with client that all costs are recorded.")
 
     # J26 — Uncategorized expenses
-    # Only match "uncategorized expense" exactly — "uncategorized" alone is too broad
-    # and would false-positive match "Uncategorized Income" rows already checked above.
-    uncat_exp = [r for r in _find_rows_matching(pl_rows, "uncategorized expense") if abs(r["amount"]) > 0.01]
+    uncat_exp = [r for r in _find_rows_matching(pl_rows, "uncategorized expense") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
     if uncat_exp:
         total_ue = sum(r["amount"] for r in uncat_exp)
         _set_pl_finding(ws_pl, 26, "clean up needed",
-                        comment="Uncategorized Expense has a balance — reclassify all transactions",
+                        comment=_acct_list(uncat_exp),
                         num_txns=str(len(uncat_exp)),
                         date_from=period_from_mmyy, date_to=period_to_mmyy,
-                        amount=f"${total_ue:,.2f}")
+                        amount=f"${total_ue:,.2f}",
+                        internal_comment="Reclassify all transactions in Uncategorized Expense to specific expense accounts.")
         pl_issues.append("Uncategorized expenses found")
     else:
-        _set_pl_finding(ws_pl, 26, "OK")
+        _set_pl_finding(ws_pl, 26, "No",
+                        comment="Uncategorized Expense account not in use",
+                        internal_comment="No transactions in Uncategorized Expense. Confirm in QBO.")
 
     # J27 — Ask My Accountant
     ama = [r for r in _find_rows_matching(pl_rows, "ask my accountant") if abs(r["amount"]) > 0.01]
     if ama:
         total_ama = sum(r["amount"] for r in ama)
         _set_pl_finding(ws_pl, 27, "clean up needed",
-                        comment="Ask My Accountant account has a balance — review and reclassify all transactions",
+                        comment=_acct_list(ama),
                         num_txns=str(len(ama)),
                         date_from=period_from_mmyy, date_to=period_to_mmyy,
-                        amount=f"${total_ama:,.2f}")
+                        amount=f"${total_ama:,.2f}",
+                        internal_comment="Review all Ask My Accountant transactions with client and reclassify to proper accounts.")
         pl_issues.append("Ask My Accountant balance found")
     else:
-        _set_pl_finding(ws_pl, 27, "OK")
+        _set_pl_finding(ws_pl, 27, "No",
+                        comment="Ask My Accountant account not in use",
+                        internal_comment="No transactions in Ask My Accountant — good bookkeeping practice confirmed.")
 
     # J28 — Reconciliation Discrepancy
-    recon = [r for r in _find_rows_matching(pl_rows, "reconciliation discrepan") if abs(r["amount"]) > 0.01]
-    if recon:
-        total_recon = sum(r["amount"] for r in recon)
+    recon_disc = [r for r in _find_rows_matching(pl_rows, "reconciliation discrepan") if abs(r["amount"]) > 0.01]
+    if recon_disc:
+        total_recon = sum(r["amount"] for r in recon_disc)
         _set_pl_finding(ws_pl, 28, "clean up needed",
-                        comment="Reconciliation Discrepancy account has a balance — investigate and correct",
-                        num_txns=str(len(recon)),
+                        comment=_acct_list(recon_disc),
+                        num_txns=str(len(recon_disc)),
                         date_from=period_from_mmyy, date_to=period_to_mmyy,
-                        amount=f"${total_recon:,.2f}")
+                        amount=f"${total_recon:,.2f}",
+                        internal_comment="Investigate the Reconciliation Discrepancy balance — this account should always be $0. Find and correct the source of the discrepancy.")
         pl_issues.append("Reconciliation Discrepancy balance found")
     else:
-        _set_pl_finding(ws_pl, 28, "OK")
+        _set_pl_finding(ws_pl, 28, "No",
+                        comment="Reconciliation Discrepancy account not in use",
+                        internal_comment="No balance in Reconciliation Discrepancy — accounts reconcile correctly.")
 
     # J29 — Expenses that should be COGS
-    should_cogs = [r for r in _find_rows_matching(pl_rows, "subcontractor", "direct labor", "direct material", "job cost", "project cost") if abs(r["amount"]) > 0.01]
+    should_cogs = [r for r in exp_accts if any(kw in r["name"].lower() for kw in ["subcontractor", "direct labor", "direct material", "job cost", "project cost", "contract labor"])]
     if should_cogs:
-        names = ", ".join(r["name"] for r in should_cogs[:3])
         _set_pl_finding(ws_pl, 29, "clean up needed",
-                        comment=f"Possible COGS items in expenses: {names} — consider reclassifying",
-                        num_txns=str(len(should_cogs)))
+                        comment=_acct_list(should_cogs),
+                        num_txns=str(len(should_cogs)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in should_cogs):,.2f}",
+                        internal_comment="These accounts may belong in COGS rather than Expenses. Review with client to confirm proper classification.")
         pl_issues.append("Possible COGS items recorded as expenses")
     else:
-        _set_pl_finding(ws_pl, 29, "OK")
+        _set_pl_finding(ws_pl, 29, "No",
+                        comment=f"Reviewed {len(exp_accts)} expense accounts — no obvious COGS items found in expenses",
+                        internal_comment="No subcontractor/direct labor/job cost accounts found in Expenses section.")
 
     # J30 — Personal expenses
-    personal = [r for r in _find_rows_matching(pl_rows, "personal", "owner expense", "meals", "entertainment") if abs(r["amount"]) > 0.01]
+    personal = [r for r in exp_accts if any(kw in r["name"].lower() for kw in ["personal", "owner expense", "meals", "entertainment"])]
     if personal:
-        names = ", ".join(r["name"] for r in personal[:3])
         _set_pl_finding(ws_pl, 30, "clean up needed",
-                        comment=f"Possible personal expenses: {names} — verify business purpose or reclassify to owner draws",
-                        num_txns=str(len(personal)))
+                        comment=_acct_list(personal),
+                        num_txns=str(len(personal)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in personal):,.2f}",
+                        internal_comment="Verify business purpose for each transaction. Reclassify personal items to Owner Draw or equity accounts.")
         pl_issues.append("Possible personal expenses in business books")
     else:
-        _set_pl_finding(ws_pl, 30, "OK")
+        _set_pl_finding(ws_pl, 30, "No",
+                        comment="No personal expense accounts found",
+                        internal_comment="No meals/entertainment/personal accounts with balances. Confirm with client that all personal expenses are properly separated.")
 
     # J31 — Loan payments as expenses
-    loan_exp = [r for r in _find_rows_matching(pl_rows, "loan payment", "note payable payment", "principal") if abs(r["amount"]) > 0.01]
+    loan_exp = [r for r in exp_accts if any(kw in r["name"].lower() for kw in ["loan payment", "note payable payment", "principal"])]
     if loan_exp:
         _set_pl_finding(ws_pl, 31, "clean up needed",
-                        comment="Loan principal payments appear as expenses — split between principal (liability) and interest (expense)",
+                        comment=_acct_list(loan_exp),
                         num_txns=str(len(loan_exp)),
-                        amount=f"${sum(r['amount'] for r in loan_exp):,.2f}")
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in loan_exp):,.2f}",
+                        internal_comment="Split loan payments: principal portion to Loan Payable (liability), interest portion to Interest Expense.")
         pl_issues.append("Loan payments recorded as expenses")
     else:
-        _set_pl_finding(ws_pl, 31, "OK")
+        _set_pl_finding(ws_pl, 31, "No",
+                        comment="No loan payment accounts found in expenses",
+                        internal_comment="No loan principal amounts in expenses. Confirm with client if there are any outstanding loans.")
 
     # J32 — Fixed assets under $2500 expensed
-    asset_accts = [r for r in _find_rows_matching(pl_rows, "office supplies", "repairs and maintenance", "computer", "equipment rental") if r["amount"] > 2500]
-    if asset_accts:
-        names = ", ".join(f"{r['name']} (${r['amount']:,.2f})" for r in asset_accts[:3])
+    asset_suspect = [r for r in exp_accts if any(kw in r["name"].lower() for kw in ["office supplies", "repairs and maintenance", "computer", "equipment rental"]) and r["amount"] > 2500]
+    if asset_suspect:
         _set_pl_finding(ws_pl, 32, "clean up needed",
-                        comment=f"High balances in potential asset expense accounts: {names} — review for capitalization",
-                        num_txns=str(len(asset_accts)))
+                        comment=_acct_list(asset_suspect),
+                        num_txns=str(len(asset_suspect)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in asset_suspect):,.2f}",
+                        internal_comment="Review each transaction — if single item exceeds capitalization threshold ($2,500 or client's policy), move to Fixed Assets.")
         pl_issues.append("Possible fixed asset purchases expensed — review for capitalization")
     else:
-        _set_pl_finding(ws_pl, 32, "OK")
+        _set_pl_finding(ws_pl, 32, "OK",
+                        comment="Reviewed office/repair/computer expense accounts — all within expected range",
+                        internal_comment="No accounts with balances exceeding $2,500 that would require capitalization review.")
 
     # J33 — Payroll tax liabilities to expense
     ptax_exp = [r for r in _find_rows_matching(pl_rows, "payroll tax liability", "payroll liab") if abs(r["amount"]) > 0.01]
     if ptax_exp:
         _set_pl_finding(ws_pl, 33, "clean up needed",
-                        comment="Payroll tax liabilities recorded to expense accounts — move to liability accounts")
+                        comment=_acct_list(ptax_exp),
+                        amount=f"${sum(r['amount'] for r in ptax_exp):,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Payroll tax liabilities should be in a liability account, not expense. Reclassify journal entries.")
         pl_issues.append("Payroll tax liabilities recorded as expenses")
     else:
-        _set_pl_finding(ws_pl, 33, "OK")
+        _set_pl_finding(ws_pl, 33, "No",
+                        comment="No payroll tax liability accounts found in expenses",
+                        internal_comment="No payroll tax liabilities misposted as expenses.")
 
     # J34 — Payroll expense recorded incorrectly
-    payroll_rows_pl = [r for r in _find_rows_matching(pl_rows, "payroll", "wage", "salary") if abs(r["amount"]) > 0.01]
+    payroll_rows_pl = [r for r in exp_accts if any(kw in r["name"].lower() for kw in ["payroll", "wage", "salary"])]
     has_payroll_exp = bool(payroll_rows_pl)
-    has_employer_tax = bool(_find_rows_matching(pl_rows, "employer tax", "payroll tax expense", "fica", "federal tax"))
+    has_employer_tax = bool([r for r in exp_accts if any(kw in r["name"].lower() for kw in ["employer tax", "payroll tax expense", "fica"])])
     if has_payroll_exp and not has_employer_tax:
         _set_pl_finding(ws_pl, 34, "clean up needed",
-                        comment="Payroll recorded but no separate employer payroll tax expense found — verify gross wages and employer tax accounts are properly separated")
+                        comment=_acct_list(payroll_rows_pl),
+                        amount=f"${sum(r['amount'] for r in payroll_rows_pl):,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Payroll found but no employer payroll tax expense. Verify gross wages, employer FICA, FUTA, and SUTA are recorded as separate line items.")
         pl_issues.append("Payroll structure may need review — employer taxes not clearly separated")
     else:
-        _set_pl_finding(ws_pl, 34, "OK")
+        _set_pl_finding(ws_pl, 34, "No" if not has_payroll_exp else "OK",
+                        comment="No payroll recorded in this period" if not has_payroll_exp else _acct_list(payroll_rows_pl),
+                        internal_comment="No payroll accounts found — confirm with client that payroll is handled outside QBO or not applicable." if not has_payroll_exp else "Payroll structure appears correct.")
 
-    # J35 — Miscategorized expenses
-    # Do NOT match "other expense" generically — QBO has a legitimate "Other Expenses" section
-    # (e.g. vehicle expenses, depreciation) that is correctly categorized.
-    # Only flag accounts literally named "Miscellaneous" or "General Expense".
+    # J35 — Miscategorized expenses (only literal "Miscellaneous" or "General Expense" accounts)
     misc_exp = [r for r in _find_rows_matching(pl_rows, "miscellaneous", "general expense") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
     if misc_exp:
-        names = ", ".join(r["name"] for r in misc_exp[:3])
         _set_pl_finding(ws_pl, 35, "clean up needed",
-                        comment=f"Generic expense accounts with balances: {names} — review and reclassify",
+                        comment=_acct_list(misc_exp),
                         num_txns=str(len(misc_exp)),
-                        amount=f"${sum(r['amount'] for r in misc_exp):,.2f}")
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in misc_exp):,.2f}",
+                        internal_comment="Reclassify from generic 'Miscellaneous'/'General Expense' to specific expense accounts for better reporting.")
         pl_issues.append("Miscellaneous/Other expense accounts have balances — reclassify")
     else:
-        _set_pl_finding(ws_pl, 35, "OK")
+        _set_pl_finding(ws_pl, 35, "No",
+                        comment="No Miscellaneous or General Expense accounts with balances",
+                        internal_comment="No generic expense catch-all accounts in use — expenses appear specifically categorized.")
 
     # J36 — Sales tax as expense
     st_exp = [r for r in _find_rows_matching(pl_rows, "sales tax expense", "sales tax paid") if abs(r["amount"]) > 0.01]
     if st_exp:
         _set_pl_finding(ws_pl, 36, "clean up needed",
-                        comment="Sales tax recorded as an expense — should be in Sales Tax Payable and cleared through the Sales Tax Center",
-                        amount=f"${sum(r['amount'] for r in st_exp):,.2f}")
+                        comment=_acct_list(st_exp),
+                        amount=f"${sum(r['amount'] for r in st_exp):,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Sales tax should not be an expense. Remove and record through QBO Sales Tax Center → Sales Tax Payable liability.")
         pl_issues.append("Sales tax recorded as expense")
     else:
-        _set_pl_finding(ws_pl, 36, "OK")
+        _set_pl_finding(ws_pl, 36, "No",
+                        comment="No sales tax expense accounts found",
+                        internal_comment="Sales tax not recorded as expense — correct. Verify it is tracked in QBO Sales Tax Center.")
 
-    # J39 — Negative Other Income/Expense
-    neg_other = [r for r in _find_rows_matching(pl_rows, "other income", "other expense") if r["amount"] < -0.01]
-    if neg_other:
-        names = ", ".join(r["name"] for r in neg_other[:3])
+    # ── OTHER INCOME / OTHER EXPENSES SECTION ─────────────────────────────────
+
+    # J39 — Negative or unusual balances in Other Income/Other Expenses
+    neg_other_inc = [r for r in other_inc_accts if r["amount"] < -0.01]
+    neg_other_exp = [r for r in other_exp_accts if r["amount"] < -0.01]
+    all_other = other_inc_accts + other_exp_accts
+    unusual_other = neg_other_inc + neg_other_exp
+    if unusual_other:
         _set_pl_finding(ws_pl, 39, "clean up needed",
-                        comment=f"Negative Other Income/Expense balances: {names}",
-                        num_txns=str(len(neg_other)),
-                        amount=f"${sum(r['amount'] for r in neg_other):,.2f}")
+                        comment=_acct_list(unusual_other),
+                        num_txns=str(len(unusual_other)),
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        amount=f"${sum(r['amount'] for r in unusual_other):,.2f}",
+                        internal_comment="Investigate negative balances in Other Income/Expenses — may indicate mispostings or reversed entries.")
         pl_issues.append("Negative Other Income/Expense balances")
+    elif all_other:
+        _set_pl_finding(ws_pl, 39, "OK",
+                        comment=_acct_list(all_other),
+                        amount=f"${sum(r['amount'] for r in all_other):,.2f}",
+                        internal_comment=f"Other Income: {_acct_list(other_inc_accts)}. Other Expenses: {_acct_list(other_exp_accts)}. Verify all items are properly classified in these sections.")
     else:
-        _set_pl_finding(ws_pl, 39, "OK")
+        _set_pl_finding(ws_pl, 39, "No",
+                        comment="No Other Income or Other Expense accounts with balances",
+                        internal_comment="No items in Other Income/Other Expenses sections.")
 
     # J42 — Unassigned class transactions (cannot check without P&L by Class)
-    ws_pl["J42"].value = "Review needed — run P&L by Class to verify no unassigned transactions"
+    ws_pl["J42"].value = "Review needed"
+    ws_pl["R42"].value = "Run P&L by Class in QBO to verify all transactions have a class assigned. Unassigned transactions will appear in a separate column."
 
-    # J46 — Unapplied Cash Payment Income
+    # ── CASH BASIS CHECKS ─────────────────────────────────────────────────────
+
+    # J46 — Unapplied Cash Payment Income (requires cash-basis P&L)
     ucpi = _find_amount(pl_rows, "unapplied cash payment income")
     if abs(ucpi) > 0.01:
         _set_pl_finding(ws_pl, 46, "clean up needed",
-                        comment="Unapplied Cash Payment Income found — apply outstanding payments to invoices",
-                        amount=f"${ucpi:,.2f}")
+                        comment="Unapplied Cash Payment Income",
+                        amount=f"${ucpi:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Apply outstanding customer payments to their corresponding invoices in QBO. This account should always be $0.")
         pl_issues.append("Unapplied Cash Payment Income found")
     else:
-        _set_pl_finding(ws_pl, 46, "OK")
+        _set_pl_finding(ws_pl, 46, "No",
+                        comment="No Unapplied Cash Payment Income balance found on accrual P&L",
+                        internal_comment="Run P&L on Cash Basis in QBO and verify this account is $0. Apply any open payments to invoices.")
 
-    # J49 — Unapplied Bill Payment Expense
+    # J49 — Unapplied Bill Payment Expense (requires cash-basis P&L)
     ubpe = _find_amount(pl_rows, "unapplied bill payment expense")
     if abs(ubpe) > 0.01:
         _set_pl_finding(ws_pl, 49, "clean up needed",
-                        comment="Unapplied Bill Payment Expense found — apply outstanding payments to bills",
-                        amount=f"${ubpe:,.2f}")
+                        comment="Unapplied Bill Payment Expense",
+                        amount=f"${ubpe:,.2f}",
+                        date_from=period_from_mmyy, date_to=period_to_mmyy,
+                        internal_comment="Apply outstanding vendor payments to their corresponding bills in QBO. This account should always be $0.")
         pl_issues.append("Unapplied Bill Payment Expense found")
     else:
-        _set_pl_finding(ws_pl, 49, "OK")
+        _set_pl_finding(ws_pl, 49, "No",
+                        comment="No Unapplied Bill Payment Expense balance found on accrual P&L",
+                        internal_comment="Run P&L on Cash Basis in QBO and verify this account is $0. Apply any open bill payments to bills.")
 
-    # A50 — P&L overall findings
+    # A51 — P&L Findings & Recommendations (detailed)
+    income_summary = f"Income: {_acct_list(income_accts) if income_accts else 'none'} — Total ${total_income_bal:,.2f}"
+    cogs_summary = f"COGS: {_acct_list(cogs_accts) if cogs_accts else 'none'} — Total ${total_cogs_bal:,.2f}"
+    exp_summary = f"Expenses: {_acct_list(sorted(exp_accts, key=lambda r: r['amount'], reverse=True), 5) if exp_accts else 'none'} — Total ${total_exp_bal:,.2f}"
+    other_inc_summary = f"Other Income: {_acct_list(other_inc_accts) if other_inc_accts else 'none'}"
+    other_exp_summary = f"Other Expenses: {_acct_list(other_exp_accts) if other_exp_accts else 'none'}"
+
     if pl_issues:
-        pl_summary = (
-            f"P&L ISSUES FOUND ({len(pl_issues)}):\n"
+        pl_findings = (
+            f"FINDINGS — P&L Review ({period_label}, {accounting_method} basis)\n\n"
+            f"ACCOUNT SUMMARY:\n{income_summary}\n{cogs_summary}\n{exp_summary}\n{other_inc_summary}\n{other_exp_summary}\n\n"
+            f"ISSUES IDENTIFIED ({len(pl_issues)}):\n"
             + "\n".join(f"• {issue}" for issue in pl_issues)
-            + f"\n\nReview period: {period_label} | Method: {accounting_method}"
+            + "\n\nRECOMMENDATIONS: Address each flagged item above. Review all accounts with 'clean up needed' status."
         )
     else:
-        pl_summary = (
-            f"P&L review for {period_label} on {accounting_method} basis shows no major issues. "
-            "Income, COGS, and expense accounts appear properly categorized."
+        pl_findings = (
+            f"FINDINGS — P&L Review ({period_label}, {accounting_method} basis)\n\n"
+            f"ACCOUNT SUMMARY:\n{income_summary}\n{cogs_summary}\n{exp_summary}\n{other_inc_summary}\n{other_exp_summary}\n\n"
+            f"RESULT: No major issues found. P&L accounts appear properly categorized.\n\n"
+            f"RECOMMENDATION: Continue monthly monitoring. Run P&L by Class to verify class assignments."
         )
-    ws_pl["A51"].value = pl_summary
+    ws_pl["A51"].value = pl_findings
 
-    # Work to be completed — P&L
+    # A57 — Work to be completed — P&L (with estimated bookkeeper time)
     pl_work = []
-    if any("Uncategorized" in i or "uncategorized" in i for i in pl_issues):
-        pl_work.append("Reclassify all Uncategorized Income and Uncategorized Expense transactions to proper accounts")
-    if any("Ask My Accountant" in i for i in pl_issues):
-        pl_work.append("Review and reclassify all Ask My Accountant transactions")
-    if any("Reconciliation Discrepancy" in i for i in pl_issues):
-        pl_work.append("Investigate and correct the Reconciliation Discrepancy balance")
     if any("Negative income" in i or "negative income" in i for i in pl_issues):
-        pl_work.append("Investigate and correct negative income account balances")
+        pl_work.append("Investigate and correct negative income account balances — review each transaction, reverse or reclassify as needed. Est. time: 1–2 hrs")
+    if any("Uncategorized income" in i.lower() for i in pl_issues):
+        pl_work.append("Reclassify all Uncategorized Income transactions to proper income accounts. Est. time: 1–3 hrs")
+    if any("Sales of Product Income" in i for i in pl_issues):
+        pl_work.append("Review Sales of Product Income transactions — confirm industry appropriateness or reclassify. Est. time: 30 min")
+    if any("Services account" in i for i in pl_issues):
+        pl_work.append("Review Services income transactions — confirm industry appropriateness or reclassify. Est. time: 30 min")
+    if any("Deposits recorded" in i for i in pl_issues):
+        pl_work.append("Reclassify deposit transactions from income to Deferred Revenue or correct income account. Est. time: 1 hr")
+    if any("Loan proceeds" in i for i in pl_issues):
+        pl_work.append("Move loan proceeds from income to Loan Payable (liability). Create journal entry to reverse. Est. time: 30 min")
+    if any("Sales tax recorded as income" in i for i in pl_issues):
+        pl_work.append("Remove sales tax from income deductions and record through QBO Sales Tax Center. Est. time: 1 hr")
+    if any("Negative COGS" in i for i in pl_issues):
+        pl_work.append("Investigate negative COGS balances — apply vendor credits or reverse incorrect entries. Est. time: 1–2 hrs")
+    if any("misclassification in COGS" in i.lower() for i in pl_issues):
+        pl_work.append("Reclassify expense accounts (insurance, utilities, rent) found in COGS section to Expenses. Est. time: 1 hr")
+    if any("COGS exceeds" in i or "No COGS" in i for i in pl_issues):
+        pl_work.append("Review and reconcile COGS to income — identify missing income or overstated costs. Est. time: 2–3 hrs")
     if any("Negative expense" in i or "negative expense" in i for i in pl_issues):
-        pl_work.append("Review and correct negative expense account balances — likely reversed entries needed")
-    if any("Loan" in i or "loan" in i for i in pl_issues):
-        pl_work.append("Split loan payments: principal to liability account, interest to Interest Expense")
+        pl_work.append("Review and correct negative expense balances — create reversal or correcting journal entries. Est. time: 1–2 hrs")
+    if any("expense accounts unusually high" in i.lower() for i in pl_issues):
+        pl_work.append("Review large expense accounts for unusual or duplicate entries. Est. time: 1–2 hrs")
+    if any("Uncategorized expenses" in i for i in pl_issues):
+        pl_work.append("Reclassify all Uncategorized Expense transactions to specific expense accounts. Est. time: 2–4 hrs")
+    if any("Ask My Accountant" in i for i in pl_issues):
+        pl_work.append("Review and reclassify all Ask My Accountant transactions with client approval. Est. time: 1–3 hrs")
+    if any("Reconciliation Discrepancy" in i for i in pl_issues):
+        pl_work.append("Investigate and correct the Reconciliation Discrepancy balance — should be $0. Est. time: 1–3 hrs")
+    if any("COGS items recorded as expenses" in i for i in pl_issues):
+        pl_work.append("Reclassify subcontractor/direct labor/job cost items from Expenses to COGS. Est. time: 1–2 hrs")
     if any("personal" in i.lower() for i in pl_issues):
-        pl_work.append("Review personal expense transactions — reclassify to Owner Draw or document business purpose")
-    if any("COGS" in i for i in pl_issues):
-        pl_work.append("Review COGS classification and ensure all direct costs are correctly categorized")
-    if any("Sales tax" in i or "sales tax" in i for i in pl_issues):
-        pl_work.append("Move sales tax transactions out of expense accounts and use QBO Sales Tax Center")
-    if any("Unapplied" in i for i in pl_issues):
-        pl_work.append("Apply all outstanding payments to corresponding invoices or bills in QBO")
+        pl_work.append("Review personal/meals/entertainment transactions — document business purpose or reclassify to Owner Draw. Est. time: 1–2 hrs")
+    if any("Loan payments recorded" in i for i in pl_issues):
+        pl_work.append("Split loan payments between principal (Loan Payable) and interest (Interest Expense). Est. time: 1 hr")
+    if any("fixed asset" in i.lower() for i in pl_issues):
+        pl_work.append("Review high-balance repair/equipment accounts — capitalize assets above $2,500 threshold. Est. time: 1–2 hrs")
+    if any("Payroll tax liabilities" in i for i in pl_issues):
+        pl_work.append("Reclassify payroll tax liability amounts from expense to Payroll Tax Liability accounts. Est. time: 1 hr")
+    if any("Payroll structure" in i for i in pl_issues):
+        pl_work.append("Review payroll entries to ensure gross wages, employer FICA, FUTA, and SUTA are separately recorded. Est. time: 1–2 hrs")
+    if any("Miscellaneous" in i or "Other expense accounts" in i for i in pl_issues):
+        pl_work.append("Reclassify Miscellaneous/General Expense transactions to specific expense accounts. Est. time: 1–2 hrs")
+    if any("Sales tax recorded as expense" in i for i in pl_issues):
+        pl_work.append("Remove sales tax from expense accounts and record through QBO Sales Tax Center. Est. time: 1 hr")
+    if any("Negative Other" in i for i in pl_issues):
+        pl_work.append("Investigate negative balances in Other Income/Other Expenses — reverse or reclassify. Est. time: 30 min–1 hr")
+    if any("Unapplied Cash Payment" in i for i in pl_issues):
+        pl_work.append("Apply outstanding customer payments to their invoices in QBO (Receive Payment). Est. time: 30 min–2 hrs")
+    if any("Unapplied Bill Payment" in i for i in pl_issues):
+        pl_work.append("Apply outstanding vendor bill payments to their bills in QBO (Pay Bills). Est. time: 30 min–2 hrs")
     if not pl_work:
-        pl_work.append("Continue monitoring P&L monthly for new uncategorized or unusual balances")
+        pl_work.append("P&L is clean for this period. Continue monthly review. Est. time: 30 min/month for monitoring")
+    pl_work.append("Run P&L on Cash Basis and compare to Accrual — check Unapplied Cash Payment Income and Unapplied Bill Payment Expense accounts. Est. time: 30 min")
+    pl_work.append("Run P&L by Class to verify all income and expense transactions have a class assigned. Est. time: 30 min")
     ws_pl["A57"].value = "\n".join(f"• {w}" for w in pl_work)
 
     issues_found.extend(pl_issues)
