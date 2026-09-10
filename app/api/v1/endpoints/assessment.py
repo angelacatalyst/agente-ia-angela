@@ -63,18 +63,26 @@ def _fmt_period(date_str: str) -> str:
 
 def _extract_report_rows(report: dict) -> list[dict]:
     """
-    Flatten all leaf Data rows from a QBO report into {name, amount} pairs.
+    Flatten all leaf Data rows from a QBO report into {name, amount, section} pairs.
     QBO report structure: report.Rows.Row[] where each Row is type Section (recurse)
     or type Data (leaf with ColData[0]=name, ColData[1]=amount).
+    The 'section' field tracks the nearest parent section header name so callers
+    can filter rows by which section they belong to (Income, COGS, Expenses, etc.).
     """
     results: list[dict] = []
 
-    def walk(rows: list[dict]) -> None:
+    def walk(rows: list[dict], section: str = "") -> None:
         for row in rows:
             row_type = row.get("type", "")
             if row_type == "Section":
+                # Get section header name if present
+                header = row.get("Header", {})
+                h_cols = header.get("ColData", [])
+                section_name = h_cols[0].get("value", "").strip() if h_cols else ""
+                current_section = section_name if section_name else section
+
                 child_rows = row.get("Rows", {}).get("Row", [])
-                walk(child_rows)
+                walk(child_rows, current_section)
                 # Capture section summary row (for totals like "Total Income")
                 summary = row.get("Summary", {})
                 s_cols = summary.get("ColData", [])
@@ -83,6 +91,7 @@ def _extract_report_rows(report: dict) -> list[dict]:
                         "name": s_cols[0].get("value", ""),
                         "amount": _safe_float(s_cols[1].get("value", "0")),
                         "is_summary": True,
+                        "section": current_section,
                     })
             elif row_type == "Data":
                 cols = row.get("ColData", [])
@@ -91,6 +100,7 @@ def _extract_report_rows(report: dict) -> list[dict]:
                         "name": cols[0].get("value", ""),
                         "amount": _safe_float(cols[1].get("value", "0")),
                         "is_summary": False,
+                        "section": section,
                     })
 
     rows = report.get("Rows", {}).get("Row", [])
@@ -625,7 +635,9 @@ async def run_assessment(
         _set_pl_finding(ws_pl, 9, "OK")
 
     # J10 — Uncategorized income
-    uncat_inc = [r for r in _find_rows_matching(pl_rows, "uncategorized income", "other income") if abs(r["amount"]) > 0.01]
+    # Only match the exact "Uncategorized Income" account — NOT "Other Income" which
+    # is a legitimate QBO section for items like Grant Income, interest, etc.
+    uncat_inc = [r for r in _find_rows_matching(pl_rows, "uncategorized income") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
     if uncat_inc:
         total_ui = sum(r["amount"] for r in uncat_inc)
         _set_pl_finding(ws_pl, 10, "clean up needed",
@@ -647,8 +659,18 @@ async def run_assessment(
     else:
         _set_pl_finding(ws_pl, 11, "OK")
 
-    # J12 — Services account balance
-    svc_amt = _find_amount(pl_rows, "services")
+    # J12 — Services income account balance
+    # Must be an exact/near-exact match for the "Services" income account, NOT any account
+    # whose name contains "services" (which would false-positive on "Legal & accounting services",
+    # "Professional services", etc.).  Only non-summary rows in the Income section qualify.
+    _income_sections = {"income", "revenue", "sales"}
+    svc_rows = [
+        r for r in pl_rows
+        if r["name"].strip().lower() in ("services", "service", "services income", "service income", "service revenue")
+        and not r.get("is_summary")
+        and any(s in r.get("section", "").lower() for s in _income_sections)
+    ]
+    svc_amt = sum(r["amount"] for r in svc_rows)
     if abs(svc_amt) > 0.01:
         _set_pl_finding(ws_pl, 12, "clean up needed",
                         comment="Services account has a balance — verify this is appropriate for client's industry",
@@ -704,7 +726,15 @@ async def run_assessment(
         _set_pl_finding(ws_pl, 18, "OK")
 
     # J19 — Incorrectly categorized COGS
-    cogs_suspect = [r for r in _find_rows_matching(pl_rows, "insurance", "utilities", "rent") if abs(r["amount"]) > 0.01]
+    # IMPORTANT: only search rows that are actually IN the COGS section.
+    # Searching all pl_rows would false-positive on Insurance/Utilities in the Expenses section.
+    _cogs_section_keywords = {"cost of goods", "cogs", "cost of sales", "direct cost"}
+    cogs_only_rows = [
+        r for r in pl_rows
+        if any(kw in r.get("section", "").lower() for kw in _cogs_section_keywords)
+        and not r.get("is_summary")
+    ]
+    cogs_suspect = [r for r in _find_rows_matching(cogs_only_rows, "insurance", "utilities", "rent", "office", "admin") if abs(r["amount"]) > 0.01]
     if cogs_suspect:
         names = ", ".join(r["name"] for r in cogs_suspect[:3])
         _set_pl_finding(ws_pl, 19, "clean up needed",
@@ -872,7 +902,10 @@ async def run_assessment(
         _set_pl_finding(ws_pl, 34, "OK")
 
     # J35 — Miscategorized expenses
-    misc_exp = [r for r in _find_rows_matching(pl_rows, "miscellaneous", "other expense", "general expense") if abs(r["amount"]) > 0.01]
+    # Do NOT match "other expense" generically — QBO has a legitimate "Other Expenses" section
+    # (e.g. vehicle expenses, depreciation) that is correctly categorized.
+    # Only flag accounts literally named "Miscellaneous" or "General Expense".
+    misc_exp = [r for r in _find_rows_matching(pl_rows, "miscellaneous", "general expense") if abs(r["amount"]) > 0.01 and not r.get("is_summary")]
     if misc_exp:
         names = ", ".join(r["name"] for r in misc_exp[:3])
         _set_pl_finding(ws_pl, 35, "clean up needed",
