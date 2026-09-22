@@ -76,7 +76,9 @@ export function PayrollPage() {
     setFixError(null)
     try {
       const form = new FormData()
-      form.append('file', fixFileRef.current.files[0])
+      if (!fixVoidOnly && fixFileRef.current?.files?.[0]) {
+        form.append('file', fixFileRef.current.files[0])
+      }
       const { apiClient } = await import('@/lib/api')
       const resp = await apiClient.post('/payroll/void-and-repost', form, {
         headers: { 'Content-Type': undefined },  // let axios set multipart/form-data with boundary
