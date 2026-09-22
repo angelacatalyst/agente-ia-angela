@@ -641,20 +641,44 @@ export function PayrollPage() {
                   </div>
                 </div>
 
-                {/* Mode toggles */}
+                {/* Mode selector */}
                 <div className="space-y-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={fixVoidOnly}
-                      onChange={e => { setFixVoidOnly(e.target.checked); setFixResult(null) }}
-                      className="rounded"
-                    />
-                    <span className="text-xs font-medium text-surface-700">
-                      Solo eliminar (sin re-postear) — borra las nóminas sin subir nuevas
-                    </span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
+                  <p className="text-xs font-semibold text-surface-600">Modo de operación</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className={cn(
+                      'flex items-start gap-2.5 rounded-lg border-2 px-3 py-2.5 cursor-pointer transition-all',
+                      !fixVoidOnly ? 'border-amber-400 bg-amber-50' : 'border-surface-200 hover:border-surface-300',
+                    )}>
+                      <input
+                        type="radio"
+                        name="fixMode"
+                        checked={!fixVoidOnly}
+                        onChange={() => { setFixVoidOnly(false); setFixResult(null) }}
+                        className="mt-0.5 shrink-0 accent-amber-500"
+                      />
+                      <div>
+                        <p className="text-xs font-semibold text-surface-800">Eliminar y re-postear</p>
+                        <p className="text-[11px] text-surface-500 mt-0.5">Borra las nóminas existentes y las vuelve a subir con las asignaciones actuales</p>
+                      </div>
+                    </label>
+                    <label className={cn(
+                      'flex items-start gap-2.5 rounded-lg border-2 px-3 py-2.5 cursor-pointer transition-all',
+                      fixVoidOnly ? 'border-red-400 bg-red-50' : 'border-surface-200 hover:border-surface-300',
+                    )}>
+                      <input
+                        type="radio"
+                        name="fixMode"
+                        checked={fixVoidOnly}
+                        onChange={() => { setFixVoidOnly(true); setFixResult(null) }}
+                        className="mt-0.5 shrink-0 accent-red-500"
+                      />
+                      <div>
+                        <p className="text-xs font-semibold text-surface-800">Solo eliminar</p>
+                        <p className="text-[11px] text-surface-500 mt-0.5">Borra las nóminas del rango sin subir nuevas (para re-subirlas manualmente)</p>
+                      </div>
+                    </label>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer mt-1">
                     <input
                       type="checkbox"
                       checked={fixDryRun}
@@ -662,7 +686,7 @@ export function PayrollPage() {
                       className="rounded"
                     />
                     <span className="text-xs font-medium text-surface-700">
-                      Vista previa (dry run) — sin cambios en QBO
+                      Vista previa (dry run) — muestra qué se va a hacer sin ejecutar cambios en QBO
                     </span>
                   </label>
                 </div>
