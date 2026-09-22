@@ -711,7 +711,8 @@ def _best_qbo_match(
             if ratio >= 0.4:
                 return item
     # 3. all significant words present in the candidate
-    words = [w for w in tn.split() if len(w) > 2]
+    # Use len >= 2 so short numeric tokens like "01" vs "02" can distinguish grants
+    words = [w for w in tn.split() if len(w) >= 2]
     if words:
         for item in items:
             cn = _normalize_name(item.get(name_key) or "")
