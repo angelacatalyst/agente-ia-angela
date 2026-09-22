@@ -53,6 +53,7 @@ export function PayrollPage() {
   const [fixDateFrom, setFixDateFrom] = useState('2025-01-01')
   const [fixDateTo, setFixDateTo] = useState('2025-07-31')
   const [fixDryRun, setFixDryRun] = useState(true)
+  const [fixVoidOnly, setFixVoidOnly] = useState(false)
   const [fixLoading, setFixLoading] = useState(false)
   const [fixResult, setFixResult] = useState<any>(null)
   const [fixError, setFixError] = useState<string | null>(null)
@@ -68,7 +69,8 @@ export function PayrollPage() {
   }
 
   const runFixHistorical = async () => {
-    if (!fixFileRef.current?.files?.[0] || !fixRealm) return
+    if (!fixRealm) return
+    if (!fixVoidOnly && !fixFileRef.current?.files?.[0]) return
     setFixLoading(true)
     setFixResult(null)
     setFixError(null)
@@ -83,6 +85,7 @@ export function PayrollPage() {
           date_from: fixDateFrom,
           date_to: fixDateTo,
           dry_run: fixDryRun,
+          void_only: fixVoidOnly,
           expense_account: 'Salaries & Wages',
           payroll_vendor: 'Gusto',
           bank_account: 'Payroll',
@@ -610,14 +613,20 @@ export function PayrollPage() {
                   <div className="col-span-2">
                     <label className="block text-xs font-medium text-surface-600 mb-1">
                       Archivo Gusto (.xlsx) — períodos a corregir
+                      {fixVoidOnly && <span className="ml-1 text-surface-400 font-normal">(no requerido en modo solo-eliminar)</span>}
                     </label>
                     <div
                       onClick={() => fixFileRef.current?.click()}
-                      className="border border-dashed border-surface-300 rounded-lg px-4 py-3 text-center cursor-pointer hover:border-primary-400 hover:bg-primary-50 transition-all"
+                      className={cn(
+                        'border border-dashed rounded-lg px-4 py-3 text-center cursor-pointer transition-all',
+                        fixVoidOnly
+                          ? 'border-surface-200 bg-surface-50 opacity-50'
+                          : 'border-surface-300 hover:border-primary-400 hover:bg-primary-50',
+                      )}
                     >
                       <Upload size={14} className="mx-auto text-surface-400 mb-1" />
                       <p className="text-xs text-surface-500">
-                        {fixFileName ?? 'Clic para subir el archivo Gusto'}
+                        {fixFileName ?? (fixVoidOnly ? 'No necesario en modo solo-eliminar' : 'Clic para subir el archivo Gusto')}
                       </p>
                     </div>
                     <input
@@ -630,18 +639,31 @@ export function PayrollPage() {
                   </div>
                 </div>
 
-                {/* Dry run toggle */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={fixDryRun}
-                    onChange={e => setFixDryRun(e.target.checked)}
-                    className="rounded"
-                  />
-                  <span className="text-xs font-medium text-surface-700">
-                    Vista previa (dry run) — sin cambios en QBO
-                  </span>
-                </label>
+                {/* Mode toggles */}
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={fixVoidOnly}
+                      onChange={e => { setFixVoidOnly(e.target.checked); setFixResult(null) }}
+                      className="rounded"
+                    />
+                    <span className="text-xs font-medium text-surface-700">
+                      Solo eliminar (sin re-postear) — borra las nóminas sin subir nuevas
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={fixDryRun}
+                      onChange={e => setFixDryRun(e.target.checked)}
+                      className="rounded"
+                    />
+                    <span className="text-xs font-medium text-surface-700">
+                      Vista previa (dry run) — sin cambios en QBO
+                    </span>
+                  </label>
+                </div>
 
                 {/* Error */}
                 {fixError && (
@@ -661,13 +683,15 @@ export function PayrollPage() {
                   )}>
                     {fixResult.dry_run ? (
                       <>
-                        <p className="font-semibold">Vista previa:</p>
+                        <p className="font-semibold">Vista previa{fixResult.void_only ? ' (solo eliminar)' : ''}:</p>
                         <p>🗑️ Se eliminarán <strong>{fixResult.to_void?.count ?? 0}</strong> expenses
                           {fixResult.to_void?.agent_count != null && (
                             <span className="text-blue-600"> ({fixResult.to_void.agent_count} agente + {fixResult.to_void.manual_count} manual)</span>
                           )}
                         </p>
-                        <p>✅ Se re-postearán <strong>{fixResult.to_repost?.period_count ?? 0}</strong> períodos con los % actuales</p>
+                        {!fixResult.void_only && (
+                          <p>✅ Se re-postearán <strong>{fixResult.to_repost?.period_count ?? 0}</strong> períodos con los % actuales</p>
+                        )}
                         {fixResult.to_void?.expenses?.length > 0 && (
                           <details className="mt-1">
                             <summary className="cursor-pointer font-medium">Ver expenses a eliminar</summary>
@@ -691,12 +715,19 @@ export function PayrollPage() {
                       <>
                         <p className="font-semibold">{fixResult.summary}</p>
                         <p>🗑️ Eliminados: <strong>{fixResult.voided?.count}</strong>
+                          {fixResult.voided?.agent_count != null && (
+                            <span className="ml-1 opacity-70">({fixResult.voided.agent_count} agente + {fixResult.voided.manual_count} manual)</span>
+                          )}
                           {fixResult.voided?.errors?.length > 0 &&
                             <span className="text-red-600 ml-1">({fixResult.voided.errors.length} errores)</span>}
                         </p>
-                        <p>✅ Re-posteados: <strong>{fixResult.reposted?.count}</strong> — Total: <strong>${fixResult.reposted?.total_posted?.toLocaleString()}</strong></p>
-                        {fixResult.reposted?.errors?.length > 0 && (
-                          <p className="text-red-600">⚠️ {fixResult.reposted.errors.length} errores al re-postear</p>
+                        {!fixResult.void_only && (
+                          <>
+                            <p>✅ Re-posteados: <strong>{fixResult.reposted?.count}</strong> — Total: <strong>${fixResult.reposted?.total_posted?.toLocaleString()}</strong></p>
+                            {fixResult.reposted?.errors?.length > 0 && (
+                              <p className="text-red-600">⚠️ {fixResult.reposted.errors.length} errores al re-postear</p>
+                            )}
+                          </>
                         )}
                       </>
                     )}
@@ -705,16 +736,19 @@ export function PayrollPage() {
 
                 <button
                   onClick={runFixHistorical}
-                  disabled={fixLoading || !fixFileRef.current?.files?.[0] || !fixRealm}
+                  disabled={fixLoading || (!fixVoidOnly && !fixFileRef.current?.files?.[0]) || !fixRealm}
                   className={cn(
                     'btn-primary w-full justify-center',
-                    !fixDryRun && 'bg-amber-600 hover:bg-amber-700 border-amber-700',
+                    !fixDryRun && !fixVoidOnly && 'bg-amber-600 hover:bg-amber-700 border-amber-700',
+                    !fixDryRun && fixVoidOnly && 'bg-red-600 hover:bg-red-700 border-red-700',
                   )}
                 >
                   {fixLoading ? (
                     <><Loader2 size={13} className="animate-spin" /> Procesando…</>
                   ) : fixDryRun ? (
                     <><Eye size={13} /> Vista previa</>
+                  ) : fixVoidOnly ? (
+                    <><X size={13} /> Eliminar nóminas de QBO</>
                   ) : (
                     <><ShieldCheck size={13} /> Anular y Re-postear en QBO</>
                   )}

@@ -186,7 +186,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
                 "waterfall": [
                     {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 25346.25, "start_date": "2026-04-01"},
-                    {"name": "City of Miami District 1:City of Miami District 1- MFE Funds", "annual_budget": 200000.00},
+                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00},
                 ],
             },
             {
@@ -666,7 +666,7 @@ GRANT_NAME_ALIASES: dict[str, str] = {
     "MHFA 2026-2027":                "MHFA 2026-2027 ($25,000) Q4-26",
     "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
     "Citi Community Progress Grant": "Citi- Community Progress Maker Grant",
-    "City of Miami District 1:City of Miami District 1- MFE Funds":  "City of Miami District 1- MFE Funds ($200,000)",
+    "City of Miami District 1 - MFE Funds":                          "City of Miami District 1 - MFE Funds ($200,000)",
     "Miami-Dade County Office of the Mayor:MDC Mayor Cava":          "MDC Mayor Cava ($71,200)",
     "Truist Foundation":             "Truist Foundation ($100,000)",
     "B3 Living Cities 2026":         "B3- Living Cities 2026",
@@ -1430,7 +1430,7 @@ async def post_payroll_to_qbo(
 
 @router.post("/void-and-repost")
 async def void_and_repost_historical(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     realm_id: str = Query(...),
     date_from: str = Query(..., description="Start date YYYY-MM-DD (e.g. 2025-01-01)"),
     date_to: str = Query(..., description="End date YYYY-MM-DD (e.g. 2025-07-31)"),
@@ -1444,6 +1444,7 @@ async def void_and_repost_historical(
     dental_expense_account: str = Query("Dental & Vision Plans"),
     dental_vendor: str = Query("The Guardian"),
     dry_run: bool = Query(True, description="true = preview only; false = void + repost"),
+    void_only: bool = Query(False, description="true = void/delete only, do not re-post"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
@@ -1452,40 +1453,47 @@ async def void_and_repost_historical(
     then re-post every pay period in the Gusto file that falls within that range
     using the current ALLOCATION_MATRIX percentages and correct QBO departments.
 
+    When void_only=true: only deletes, no re-post. Gusto file is not required.
+
     Safe workflow:
       1. Run with dry_run=true → review what will be voided and what will be re-posted.
          The response shows each expense tagged as 'agent' or 'manual'.
       2. Run with dry_run=false → void old entries, post corrected ones.
     """
-    # ── 1. Parse Gusto file ───────────────────────────────────────────────────
-    if not file.filename or not file.filename.endswith(".xlsx"):
-        raise HTTPException(400, "Please upload a .xlsx Gusto file.")
-    data = await file.read()
-    try:
-        raw_periods = _parse_gusto(data)
-    except Exception as e:
-        raise HTTPException(422, f"Could not parse Gusto file: {e}")
-    if not raw_periods:
-        raise HTTPException(422, "No pay periods found in file.")
-
-    enriched, budget_status = _apply_waterfall(raw_periods)
-
-    # Filter periods that fall within date_from / date_to
     from datetime import date as _date
-    def _in_range(payday: str) -> bool:
-        try:
-            d = _date.fromisoformat(payday)
-            return _date.fromisoformat(date_from) <= d <= _date.fromisoformat(date_to)
-        except ValueError:
-            return False
 
-    periods_in_range = [p for p in enriched if _in_range(p.get("payday", ""))]
-    if not periods_in_range:
-        raise HTTPException(
-            422,
-            f"No pay periods in the Gusto file fall within {date_from} – {date_to}. "
-            f"Periods found: {[p['period'] for p in enriched]}"
-        )
+    # ── 1. Parse Gusto file (only needed when re-posting) ────────────────────
+    enriched: list[dict] = []
+    budget_status: dict = {}
+    periods_in_range: list[dict] = []
+
+    if not void_only:
+        if not file or not file.filename or not file.filename.endswith(".xlsx"):
+            raise HTTPException(400, "Please upload a .xlsx Gusto file (required when not using void-only mode).")
+        data = await file.read()
+        try:
+            raw_periods = _parse_gusto(data)
+        except Exception as e:
+            raise HTTPException(422, f"Could not parse Gusto file: {e}")
+        if not raw_periods:
+            raise HTTPException(422, "No pay periods found in file.")
+
+        enriched, budget_status = _apply_waterfall(raw_periods)
+
+        def _in_range(payday: str) -> bool:
+            try:
+                d = _date.fromisoformat(payday)
+                return _date.fromisoformat(date_from) <= d <= _date.fromisoformat(date_to)
+            except ValueError:
+                return False
+
+        periods_in_range = [p for p in enriched if _in_range(p.get("payday", ""))]
+        if not periods_in_range:
+            raise HTTPException(
+                422,
+                f"No pay periods in the Gusto file fall within {date_from} – {date_to}. "
+                f"Periods found: {[p['period'] for p in enriched]}"
+            )
 
     # ── 2. Init QBO client ────────────────────────────────────────────────────
     qbo = await get_qbo_client_for_realm(realm_id, db)
@@ -1527,6 +1535,28 @@ async def void_and_repost_historical(
     ]
 
     if dry_run:
+        manual_count = sum(1 for v in void_preview if v["source"] == "manual")
+        agent_count  = sum(1 for v in void_preview if v["source"] == "agent")
+
+        if void_only:
+            return {
+                "dry_run":   True,
+                "void_only": True,
+                "date_range": {"from": date_from, "to": date_to},
+                "to_void": {
+                    "count":        len(agent_expenses),
+                    "agent_count":  agent_count,
+                    "manual_count": manual_count,
+                    "expenses":     void_preview,
+                },
+                "message": (
+                    f"Will void {len(agent_expenses)} existing payroll expenses "
+                    f"({agent_count} agent-created with PR-* prefix, "
+                    f"{manual_count} manually entered via Gusto/The Guardian). "
+                    f"No re-post will be performed. Set dry_run=false to execute."
+                ),
+            }
+
         # Build re-post preview (same as post-to-qbo dry_run per period)
         repost_preview = []
         for period in periods_in_range:
@@ -1539,8 +1569,6 @@ async def void_and_repost_historical(
                 ],
                 "period_total_cost": period["period_total_cost"],
             })
-        manual_count = sum(1 for v in void_preview if v["source"] == "manual")
-        agent_count  = sum(1 for v in void_preview if v["source"] == "agent")
         return {
             "dry_run": True,
             "date_range": {"from": date_from, "to": date_to},
@@ -1561,6 +1589,56 @@ async def void_and_repost_historical(
                 f"and re-post {len(periods_in_range)} periods "
                 f"with current allocation percentages and correct departments. "
                 f"Set dry_run=false to execute."
+            ),
+        }
+
+    # ── void_only fast-path: skip all repost setup, void everything and return ─
+    if void_only:
+        voided_vo: list[dict] = []
+        void_errors_vo: list[str] = []
+
+        import asyncio as _asyncio
+
+        async def _void_one_vo(p: dict):
+            try:
+                await qbo.void_purchase(p["Id"], p["SyncToken"])
+                return ("ok", {
+                    "id": p["Id"],
+                    "doc_number": p.get("DocNumber") or "(manual)",
+                    "date": p.get("TxnDate"),
+                    "amount": p.get("TotalAmt"),
+                    "source": "agent" if (p.get("DocNumber") or "").startswith("PR-") else "manual",
+                })
+            except Exception as e:
+                return ("err", f"Could not void {p.get('DocNumber') or p['Id']}: {e}")
+
+        _BATCH = 20
+        for _i in range(0, len(agent_expenses), _BATCH):
+            _batch = agent_expenses[_i:_i + _BATCH]
+            _results = await _asyncio.gather(*[_void_one_vo(p) for p in _batch])
+            for _status, _val in _results:
+                if _status == "ok":
+                    voided_vo.append(_val)
+                else:
+                    void_errors_vo.append(_val)
+
+        agent_voided = sum(1 for v in voided_vo if v.get("source") == "agent")
+        manual_voided = sum(1 for v in voided_vo if v.get("source") == "manual")
+        return {
+            "dry_run":    False,
+            "void_only":  True,
+            "date_range": {"from": date_from, "to": date_to},
+            "voided": {
+                "count":         len(voided_vo),
+                "agent_count":   agent_voided,
+                "manual_count":  manual_voided,
+                "items":         voided_vo,
+                "errors":        void_errors_vo,
+            },
+            "summary": (
+                f"Deleted {len(voided_vo)} payroll expenses "
+                f"({agent_voided} agent-created, {manual_voided} manual). "
+                f"{len(void_errors_vo)} errors."
             ),
         }
 
