@@ -77,13 +77,13 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             "Smithsonian":        0.05,
             "Festival del Platano": 0.05,
         },
-        # Pool 1: clase 3010 → 3010 Predevelopment Grant exclusivamente
+        # Pool 1: clase 3010 → 3010 Predevelopment Grant exclusivamente ($100,000 de Mileyka)
         # Pool 2: resto de clases → 3C MHA Q1 → Q2 → MHFA 2026-2027 → PENDING cuando se agoten
         "grant_rules": [
             {
                 "pool_classes": ["3010"],
                 "waterfall": [
-                    {"name": "3010 Predevelopment Grant", "annual_budget": 500000.00},
+                    {"name": "3010 Predevelopment Grant", "annual_budget": 100000.00},
                 ],
             },
             {
@@ -661,7 +661,7 @@ CLASS_NAME_ALIASES: dict[str, str] = {
 # Used so fuzzy matching never picks the wrong customer when multiple grants
 # share a funder name (e.g. two City of Miami grants).
 GRANT_NAME_ALIASES: dict[str, str] = {
-    "3C MHA 25-26 Q1":               "3C MHA 25-26 ($75,000) $30,000 2026 01",
+    "3C MHA 25-26 Q1":               "3C MHA ($75,000) $30,000 2026 01",
     "3C MHA 25-26 Q2":               "3C MHA 25-26 ($75,000) $25,000 2026 02",
     "MHFA 2026-2027":                "MHFA 2026-2027 ($25,000) Q4-26",
     "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
