@@ -1715,7 +1715,12 @@ async def void_and_repost_historical(
                  or _best_qbo_match(cls, qbo_classes, "Name"))
             class_map_p[cls] = m["Id"] if m else ""
         for g in all_grants_p:
-            m = _mc(g)
+            # Apply GRANT_NAME_ALIASES so "3C MHA 25-26 Q1" → "3C MHA ($75,000) $30,000 2026 01"
+            _g_search = GRANT_NAME_ALIASES.get(g, g)
+            m = (_best_qbo_match(_g_search, qbo_customers, "DisplayName")
+                 or _best_qbo_match(_g_search, qbo_customers, "FullyQualifiedName")
+                 or _best_qbo_match(_g_search, qbo_customers, "CompanyName")
+                 or _mc(g))
             customer_map_p[g] = m["Id"] if m else ""
         if has_pending_p:
             m = _mc(PENDING_GRANT_NAME)
