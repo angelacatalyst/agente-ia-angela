@@ -1430,7 +1430,7 @@ async def post_payroll_to_qbo(
 
 @router.post("/void-and-repost")
 async def void_and_repost_historical(
-    file: Optional[UploadFile] = File(None),
+    file: Optional[UploadFile] = None,
     realm_id: str = Query(...),
     date_from: str = Query(..., description="Start date YYYY-MM-DD (e.g. 2025-01-01)"),
     date_to: str = Query(..., description="End date YYYY-MM-DD (e.g. 2025-07-31)"),
