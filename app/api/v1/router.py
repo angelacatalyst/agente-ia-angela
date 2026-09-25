@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     chat,
     controller,
     eod,
+    expenses,
     grants,
     integrations,
     payments,
@@ -32,6 +33,7 @@ api_router.include_router(eod.router)
 api_router.include_router(controller.router)
 api_router.include_router(integrations.router)
 api_router.include_router(qbo_data.router)
+api_router.include_router(expenses.router)
 api_router.include_router(payroll.router)
 api_router.include_router(assessment.router)
 api_router.include_router(bookkeeping.router)

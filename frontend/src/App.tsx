@@ -17,6 +17,7 @@ import { ProjectsPage } from '@/pages/ProjectsPage'
 import { AssessmentPage } from '@/pages/AssessmentPage'
 import { SOPPage } from '@/pages/SOPPage'
 import { BookkeepingPage } from '@/pages/BookkeepingPage'
+import { ExpensesPage } from '@/pages/ExpensesPage'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5, retry: 1 } },
@@ -45,6 +46,7 @@ export default function App() {
               <Route path="/assessment"   element={<AssessmentPage />} />
               <Route path="/sop"          element={<SOPPage />} />
               <Route path="/bookkeeping"  element={<BookkeepingPage />} />
+              <Route path="/expenses"     element={<ExpensesPage />} />
               <Route path="/settings"     element={<SettingsPage />} />
             </Routes>
           </main>

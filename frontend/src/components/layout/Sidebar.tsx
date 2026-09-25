@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Search, Tag, ShieldCheck, CreditCard,
   UserPlus, BookOpen, ClipboardList, BarChart3, Settings,
   MessageSquare, ChevronLeft, ChevronRight, Globe,
-  Building2, ChevronDown, CheckCircle2, Landmark, Users, FolderOpen, ClipboardCheck, FileText,
+  Building2, ChevronDown, CheckCircle2, Landmark, Users, FolderOpen, ClipboardCheck, FileText, DollarSign,
 } from 'lucide-react'
 
 const navItems = [
@@ -18,6 +18,7 @@ const navItems = [
   { to: '/transactions', labelKey: 'nav.transactions', icon: Tag },
   { to: '/bank-rec',     labelKey: 'nav.bank_rec',     icon: Landmark },
   { to: '/bookkeeping',  labelKey: 'nav.bookkeeping',  icon: Tag },
+  { to: '/expenses',     labelKey: 'nav.expenses',     icon: DollarSign },
   { to: '/assessment',   labelKey: 'nav.assessment',   icon: ClipboardCheck },
   { to: '/payroll',      labelKey: 'nav.payroll',      icon: Users },
   { to: '/projects',     labelKey: 'nav.projects',     icon: FolderOpen },

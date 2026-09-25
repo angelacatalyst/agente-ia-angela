@@ -299,6 +299,19 @@ export const api = {
       apiClient.post('/bookkeeping/categorize-batch', { realm_id: realmId, items }).then(r => r.data),
   },
 
+  expenses: {
+    list: (realmId: string, dateFrom: string, dateTo: string, noGrantOnly = false) =>
+      apiClient.get<{ total: number; expenses: QBOExpense[] }>('/expenses', {
+        params: { realm_id: realmId, date_from: dateFrom, date_to: dateTo, no_grant_only: noGrantOnly },
+      }).then(r => r.data),
+    customers: (realmId: string) =>
+      apiClient.get<{ customers: QBOCustomerOption[] }>('/expenses/customers', {
+        params: { realm_id: realmId },
+      }).then(r => r.data),
+    bulkUpdateGrant: (realmId: string, updates: { expense_id: string; customer_id: string; customer_name: string }[]) =>
+      apiClient.patch('/expenses/bulk-update-grant', { realm_id: realmId, updates }).then(r => r.data),
+  },
+
   integrations: {
     qboStatus: (realmId: string) =>
       apiClient.get('/integrations/qbo/status', { params: { realm_id: realmId } }).then(r => r.data),
@@ -309,6 +322,24 @@ export const api = {
     qboCompanies: () =>
       apiClient.get<QBOCompany[]>('/integrations/qbo/companies').then(r => r.data),
   },
+}
+
+export interface QBOExpense {
+  id:           string
+  sync_token:   string
+  date:         string
+  vendor:       string
+  memo:         string
+  amount:       number
+  classes:      string[]
+  grant:        string | null
+  grant_id:     string | null
+  payment_type: string
+}
+
+export interface QBOCustomerOption {
+  id:   string
+  name: string
 }
 
 export interface QBOCompany {
