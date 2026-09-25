@@ -816,7 +816,14 @@ def _make_allocation_lines(
     description: str,
     start_id: int = 1,
 ) -> tuple[list[dict], list[str], int]:
-    """Build QBO expense lines from allocation ratios × base_amount."""
+    """Build QBO expense lines from allocation ratios × base_amount.
+
+    After rounding each line to 2 decimal places the sum may differ from
+    base_amount by ±$0.01 (common when Q1→Q2 splits create many small lines).
+    We apply a rounding correction to the last positive line so the sum of
+    positive lines always equals exactly base_amount, preventing QBO from
+    rejecting the payload with "transaction amount must be 0 or greater".
+    """
     lines: list[dict] = []
     warnings: list[str] = []
     line_id = start_id
@@ -854,6 +861,23 @@ def _make_allocation_lines(
             "AccountBasedExpenseLineDetail": detail,
         })
         line_id += 1
+
+    # ── Rounding correction ───────────────────────────────────────────────────
+    # Adjust the last line so positive lines sum to exactly base_amount.
+    # This prevents QBO 400 "amount must be 0 or greater" when rounding drift
+    # makes the net total negative (e.g., dental payload: $24.36 - $24.37 = -$0.01).
+    if lines:
+        positive_lines = [l for l in lines if l["Amount"] > 0]
+        if positive_lines:
+            current_sum = round(sum(l["Amount"] for l in positive_lines), 2)
+            diff = round(base_amount - current_sum, 2)
+            if diff != 0:
+                # Apply correction to last positive line; ensure it stays > 0
+                last = positive_lines[-1]
+                corrected = round(last["Amount"] + diff, 2)
+                if corrected > 0:
+                    last["Amount"] = corrected
+
     return lines, warnings, line_id
 
 
