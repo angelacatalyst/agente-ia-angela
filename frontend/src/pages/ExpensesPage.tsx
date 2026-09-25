@@ -5,7 +5,7 @@ import { api, type QBOExpense, type QBOCustomerOption } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   Loader2, Search, CheckSquare, Square, Tag, AlertCircle,
-  CheckCircle2, RefreshCw, Filter, DollarSign,
+  CheckCircle2, RefreshCw, Filter, DollarSign, Receipt,
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -127,6 +127,7 @@ export function ExpensesPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <PageHeader
+        icon={Receipt}
         title="Gastos"
         subtitle="Asigna o modifica el grant en tus gastos de QBO"
       />
