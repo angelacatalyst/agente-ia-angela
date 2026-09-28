@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.core.dependencies import get_qbo_client_for_realm
+from app.core.dependencies import DbDep, get_qbo_client_for_realm
 
 router = APIRouter(prefix="/expenses", tags=["expenses"])
 
@@ -80,13 +80,14 @@ async def list_expenses(
     date_from:     str  = Query(..., description="YYYY-MM-DD"),
     date_to:       str  = Query(..., description="YYYY-MM-DD"),
     no_grant_only: bool = Query(False, description="Return only expenses without a grant assigned"),
+    db: DbDep = None,
 ) -> dict:
     """
     Return Purchase (Expense) transactions for a date range.
     Optionally filter to only those without a grant (CustomerRef).
     """
     try:
-        qbo = await get_qbo_client_for_realm(realm_id)
+        qbo = await get_qbo_client_for_realm(realm_id, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -111,10 +112,13 @@ async def list_expenses(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/customers")
-async def list_customers(realm_id: str = Query(...)) -> dict:
+async def list_customers(
+    realm_id: str = Query(...),
+    db: DbDep = None,
+) -> dict:
     """Return active QBO Customers (grants) for the grant-picker dropdown."""
     try:
-        qbo = await get_qbo_client_for_realm(realm_id)
+        qbo = await get_qbo_client_for_realm(realm_id, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -147,14 +151,17 @@ class BulkUpdateRequest(BaseModel):
 
 
 @router.patch("/bulk-update-grant")
-async def bulk_update_grant(body: BulkUpdateRequest) -> dict:
+async def bulk_update_grant(
+    body: BulkUpdateRequest,
+    db: DbDep = None,
+) -> dict:
     """
     For each expense in `updates`: fetch the full Purchase from QBO,
     set CustomerRef on every AccountBasedExpenseLineDetail line,
     then re-post it (full update, not sparse, to preserve bank-feed links).
     """
     try:
-        qbo = await get_qbo_client_for_realm(body.realm_id)
+        qbo = await get_qbo_client_for_realm(body.realm_id, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
