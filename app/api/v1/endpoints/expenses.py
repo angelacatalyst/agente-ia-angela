@@ -180,6 +180,10 @@ async def bulk_update_grant(
                 detail = line.get("AccountBasedExpenseLineDetail")
                 if detail is not None:
                     detail["CustomerRef"] = {"value": upd.customer_id}
+                    # QBO requires BillableStatus when CustomerRef is set;
+                    # "NotBillable" is the safe default for expense grant tagging.
+                    if "BillableStatus" not in detail:
+                        detail["BillableStatus"] = "NotBillable"
 
             # 3. Also set at header level (some QBO clients use this)
             purchase["CustomerRef"] = {"value": upd.customer_id}
