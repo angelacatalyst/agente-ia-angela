@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useAppStore } from '@/stores/appStore'
 import { api, type QBOExpense, type QBOCustomerOption } from '@/lib/api'
@@ -6,9 +6,10 @@ import { cn } from '@/lib/utils'
 import {
   Loader2, Search, CheckSquare, Square, Tag, AlertCircle,
   CheckCircle2, RefreshCw, Filter, DollarSign, Receipt,
+  ArrowUpDown, ArrowUp, ArrowDown, X,
 } from 'lucide-react'
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmt(amount: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount)
@@ -18,21 +19,56 @@ function today(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-function firstOfMonth(): string {
+function firstOfYear(): string {
   const d = new Date()
-  d.setDate(1)
+  d.setMonth(0, 1)
   return d.toISOString().slice(0, 10)
 }
 
-// ── Page ─────────────────────────────────────────────────────────────────────
+type SortField = 'date' | 'vendor' | 'amount'
+type SortDir   = 'asc' | 'desc'
+
+// ── Sort header button ────────────────────────────────────────────────────────
+
+function SortHeader({
+  label, field, current, dir, onClick,
+}: {
+  label: string
+  field: SortField
+  current: SortField
+  dir: SortDir
+  onClick: (f: SortField) => void
+}) {
+  const active = current === field
+  const Icon = active ? (dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <button
+      onClick={() => onClick(field)}
+      className={cn(
+        'flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide transition-colors',
+        active ? 'text-primary-600' : 'text-surface-500 hover:text-surface-700',
+      )}
+    >
+      {label}
+      <Icon size={11} className={active ? 'text-primary-500' : 'text-surface-400'} />
+    </button>
+  )
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export function ExpensesPage() {
   const { selectedRealmId } = useAppStore()
 
   // Filters
-  const [dateFrom, setDateFrom]     = useState(firstOfMonth())
-  const [dateTo, setDateTo]         = useState(today())
+  const [dateFrom, setDateFrom]       = useState(firstOfYear())
+  const [dateTo, setDateTo]           = useState(today())
   const [noGrantOnly, setNoGrantOnly] = useState(false)
+  const [search, setSearch]           = useState('')
+
+  // Sort
+  const [sortField, setSortField] = useState<SortField>('date')
+  const [sortDir, setSortDir]     = useState<SortDir>('desc')
 
   // Data
   const [expenses, setExpenses]       = useState<QBOExpense[]>([])
@@ -42,10 +78,10 @@ export function ExpensesPage() {
   const [error, setError]             = useState<string | null>(null)
 
   // Selection + grant assignment
-  const [selected, setSelected]       = useState<Set<string>>(new Set())
-  const [grantId, setGrantId]         = useState('')
-  const [saving, setSaving]           = useState(false)
-  const [result, setResult]           = useState<{ success: number; failed: number; errors: string[] } | null>(null)
+  const [selected, setSelected]   = useState<Set<string>>(new Set())
+  const [grantId, setGrantId]     = useState('')
+  const [saving, setSaving]       = useState(false)
+  const [result, setResult]       = useState<{ success: number; failed: number; errors: string[] } | null>(null)
 
   // Load customers once
   useEffect(() => {
@@ -63,6 +99,7 @@ export function ExpensesPage() {
     setError(null)
     setSelected(new Set())
     setResult(null)
+    setSearch('')
     try {
       const data = await api.expenses.list(selectedRealmId, dateFrom, dateTo, noGrantOnly)
       setExpenses(data.expenses)
@@ -73,6 +110,41 @@ export function ExpensesPage() {
     }
   }, [selectedRealmId, dateFrom, dateTo, noGrantOnly])
 
+  // Sort toggle
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      setSortDir(field === 'date' ? 'desc' : 'asc')
+    }
+    // Keep current selection intact when re-sorting
+  }
+
+  // Filtered + sorted expenses
+  const displayed = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    let list = expenses
+
+    if (q) {
+      list = list.filter(e => {
+        const matchVendor = (e.vendor || '').toLowerCase().includes(q)
+        // also allow searching by amount, e.g. "48" or "48.00"
+        const matchAmount = fmt(e.amount).replace(/[$,]/g, '').includes(q) ||
+                            String(e.amount).includes(q)
+        return matchVendor || matchAmount
+      })
+    }
+
+    return [...list].sort((a, b) => {
+      let cmp = 0
+      if (sortField === 'date')   cmp = a.date.localeCompare(b.date)
+      if (sortField === 'vendor') cmp = (a.vendor || '').localeCompare(b.vendor || '')
+      if (sortField === 'amount') cmp = a.amount - b.amount
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+  }, [expenses, search, sortField, sortDir])
+
   // Toggle row selection
   const toggleRow = (id: string) =>
     setSelected(prev => {
@@ -82,11 +154,18 @@ export function ExpensesPage() {
     })
 
   const toggleAll = () => {
-    if (selected.size === expenses.length) {
-      setSelected(new Set())
-    } else {
-      setSelected(new Set(expenses.map(e => e.id)))
-    }
+    // Toggles only the DISPLAYED rows (respects search filter)
+    const displayedIds = displayed.map(e => e.id)
+    const allDisplayedSelected = displayedIds.every(id => selected.has(id))
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (allDisplayedSelected) {
+        displayedIds.forEach(id => next.delete(id))
+      } else {
+        displayedIds.forEach(id => next.add(id))
+      }
+      return next
+    })
   }
 
   // Bulk assign grant
@@ -107,7 +186,6 @@ export function ExpensesPage() {
         failed:  res.summary.failed,
         errors:  res.errors ?? [],
       })
-      // Refresh list after update
       await fetchExpenses()
     } catch (e: any) {
       setResult({
@@ -120,8 +198,8 @@ export function ExpensesPage() {
     }
   }
 
-  const allSelected = expenses.length > 0 && selected.size === expenses.length
-  const someSelected = selected.size > 0 && !allSelected
+  const allDisplayedSelected = displayed.length > 0 && displayed.every(e => selected.has(e.id))
+  const someDisplayedSelected = displayed.some(e => selected.has(e.id)) && !allDisplayedSelected
   const selectedGrant = customers.find(c => c.id === grantId)
 
   return (
@@ -240,14 +318,37 @@ export function ExpensesPage() {
         {/* ── Table ── */}
         {expenses.length > 0 && (
           <div className="rounded-xl border border-surface-200 bg-white shadow-sm overflow-hidden">
-            {/* Table header with count */}
-            <div className="flex items-center justify-between border-b border-surface-100 px-4 py-2.5 bg-surface-50">
-              <span className="text-xs font-semibold text-surface-500 uppercase tracking-wide">
-                {expenses.length} gasto{expenses.length !== 1 ? 's' : ''}
+            {/* Table toolbar: count + search + refresh */}
+            <div className="flex items-center justify-between border-b border-surface-100 px-4 py-2.5 bg-surface-50 gap-3">
+              <span className="text-xs font-semibold text-surface-500 uppercase tracking-wide shrink-0">
+                {displayed.length !== expenses.length
+                  ? `${displayed.length} de ${expenses.length} gasto${expenses.length !== 1 ? 's' : ''}`
+                  : `${expenses.length} gasto${expenses.length !== 1 ? 's' : ''}`}
               </span>
+
+              {/* Search box */}
+              <div className="relative flex-1 max-w-xs">
+                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Buscar por proveedor o monto…"
+                  className="w-full rounded-lg border border-surface-200 bg-white pl-7 pr-7 py-1.5 text-xs text-surface-800 placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+                {search && (
+                  <button
+                    onClick={() => setSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-600"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+
               <button
                 onClick={fetchExpenses}
-                className="flex items-center gap-1 text-xs text-surface-500 hover:text-surface-700 transition-colors"
+                className="flex items-center gap-1 text-xs text-surface-500 hover:text-surface-700 transition-colors shrink-0"
               >
                 <RefreshCw size={11} />
                 Actualizar
@@ -260,22 +361,28 @@ export function ExpensesPage() {
                   <tr className="border-b border-surface-100 bg-surface-50/50">
                     <th className="w-10 px-4 py-2.5 text-left">
                       <button onClick={toggleAll} className="text-surface-400 hover:text-surface-700 transition-colors">
-                        {allSelected
+                        {allDisplayedSelected
                           ? <CheckSquare size={15} className="text-primary-600" />
-                          : someSelected
+                          : someDisplayedSelected
                             ? <CheckSquare size={15} className="text-primary-400" />
                             : <Square size={15} />}
                       </button>
                     </th>
-                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-surface-500 uppercase tracking-wide">Fecha</th>
-                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-surface-500 uppercase tracking-wide">Proveedor</th>
+                    <th className="px-3 py-2.5 text-left">
+                      <SortHeader label="Fecha"     field="date"   current={sortField} dir={sortDir} onClick={handleSort} />
+                    </th>
+                    <th className="px-3 py-2.5 text-left">
+                      <SortHeader label="Proveedor" field="vendor" current={sortField} dir={sortDir} onClick={handleSort} />
+                    </th>
                     <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-surface-500 uppercase tracking-wide">Clase</th>
-                    <th className="px-3 py-2.5 text-right text-[11px] font-semibold text-surface-500 uppercase tracking-wide">Monto</th>
+                    <th className="px-3 py-2.5 text-right">
+                      <SortHeader label="Monto"    field="amount" current={sortField} dir={sortDir} onClick={handleSort} />
+                    </th>
                     <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-surface-500 uppercase tracking-wide">Grant actual</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-50">
-                  {expenses.map(exp => {
+                  {displayed.map(exp => {
                     const isSelected = selected.has(exp.id)
                     return (
                       <tr
@@ -331,6 +438,14 @@ export function ExpensesPage() {
                       </tr>
                     )
                   })}
+
+                  {displayed.length === 0 && search && (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-surface-400">
+                        Sin resultados para "{search}"
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -339,12 +454,15 @@ export function ExpensesPage() {
             <div className="border-t border-surface-100 px-4 py-2 bg-surface-50 flex items-center justify-between">
               <span className="text-xs text-surface-500">
                 Total: <span className="font-semibold text-surface-700">
-                  {fmt(expenses.reduce((s, e) => s + e.amount, 0))}
+                  {fmt(displayed.reduce((s, e) => s + e.amount, 0))}
                 </span>
+                {search && expenses.length !== displayed.length && (
+                  <span className="ml-2 text-surface-400">(filtrado)</span>
+                )}
               </span>
               <span className="text-xs text-surface-500">
                 Sin grant: <span className="font-semibold text-amber-600">
-                  {expenses.filter(e => !e.grant).length}
+                  {displayed.filter(e => !e.grant).length}
                 </span>
               </span>
             </div>
