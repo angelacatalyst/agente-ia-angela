@@ -197,11 +197,35 @@ async def bulk_update_grant(
                 sparse_updates["PaymentType"] = purchase["PaymentType"]
 
             await qbo.update_purchase(upd.expense_id, sync_token, sparse_updates, sparse=True)
-            updated.append({
-                "id":            upd.expense_id,
-                "grant_id":      upd.customer_id,
-                "grant_name":    upd.customer_name,
-            })
+
+            # Re-fetch from QBO to verify the change actually took effect
+            verify_resp = await qbo.get_purchase(upd.expense_id)
+            verify_purchase = verify_resp.get("Purchase", verify_resp)
+
+            actual_id = None
+            actual_name = None
+            for line in verify_purchase.get("Line", []):
+                detail = line.get("AccountBasedExpenseLineDetail", {})
+                cref = detail.get("CustomerRef")
+                if cref and cref.get("value"):
+                    actual_id = cref["value"]
+                    actual_name = cref.get("name") or actual_id
+                    break
+
+            if actual_id != upd.customer_id:
+                errors.append(
+                    f"QBO no aplicó el cambio de grant para {upd.expense_id}. "
+                    f"Enviado: {upd.customer_name!r} ({upd.customer_id}), "
+                    f"QBO tiene: {actual_name!r} ({actual_id}). "
+                    f"Esta transacción puede estar bloqueada por el bank feed de QBO."
+                )
+            else:
+                updated.append({
+                    "id":            upd.expense_id,
+                    "grant_id":      upd.customer_id,
+                    "grant_name":    upd.customer_name,
+                    "actual_grant":  actual_name,
+                })
         except Exception as e:
             # Include full error detail so the UI can display it
             errors.append(str(e))
