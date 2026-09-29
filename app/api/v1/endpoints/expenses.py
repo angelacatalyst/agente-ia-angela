@@ -187,8 +187,12 @@ async def bulk_update_grant(
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
                 updated_lines.append(line)
 
-            # 3. Sparse update — only send Line + PaymentType (required by QBO)
-            sparse_updates: dict[str, Any] = {"Line": updated_lines}
+            # 3. Sparse update — Line + CustomerRef at header level + PaymentType
+            # QBO may read CustomerRef at Purchase header OR line level depending on transaction type
+            sparse_updates: dict[str, Any] = {
+                "Line": updated_lines,
+                "CustomerRef": {"value": upd.customer_id},  # also set at header level
+            }
             if purchase.get("PaymentType"):
                 sparse_updates["PaymentType"] = purchase["PaymentType"]
 
@@ -199,7 +203,8 @@ async def bulk_update_grant(
                 "grant_name":    upd.customer_name,
             })
         except Exception as e:
-            errors.append(f"Expense {upd.expense_id}: {e}")
+            # Include full error detail so the UI can display it
+            errors.append(str(e))
 
     # Run up to 5 updates concurrently
     BATCH = 5
