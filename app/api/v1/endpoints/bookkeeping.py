@@ -348,8 +348,7 @@ async def categorize_transaction(
                 detail["AccountRef"] = {"value": upd.account_id}
             if upd.class_id:
                 detail["ClassRef"] = {"value": upd.class_id}
-            elif upd.class_id is None and "class_id" in upd.model_fields_set:
-                detail.pop("ClassRef", None)
+            # NOTE: we intentionally never clear ClassRef here — omitting class_id means "leave it unchanged"
             if upd.customer_id:
                 detail["CustomerRef"] = {"value": upd.customer_id}
             line = {**line, "AccountBasedExpenseLineDetail": detail}
@@ -420,6 +419,7 @@ async def categorize_batch(
                         detail["AccountRef"] = {"value": upd.account_id}
                     if upd.class_id:
                         detail["ClassRef"] = {"value": upd.class_id}
+                    # NOTE: we intentionally never clear ClassRef — omitting class_id means "leave it unchanged"
                     if upd.customer_id:
                         detail["CustomerRef"] = {"value": upd.customer_id}
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
