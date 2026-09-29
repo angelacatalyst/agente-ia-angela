@@ -100,8 +100,7 @@ export function ExpensesPage() {
     setLoading(true)
     setError(null)
     setSelected(new Set())
-    setResult(null)
-    setSearch('')
+    // Note: do NOT clear result or search here — result is cleared at the start of handleAssign
     try {
       const data = await api.expenses.list(selectedRealmId, dateFrom, dateTo, noGrantOnly)
       setExpenses(data.expenses)
