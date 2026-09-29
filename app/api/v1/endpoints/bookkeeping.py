@@ -364,12 +364,29 @@ async def categorize_transaction(
     try:
         result = await qbo.update_purchase(body.transaction_id, body.sync_token, updates)
         updated_txn = result.get("Purchase", {})
+
+        # Extract the actual CustomerRef from QBO's response to verify the update worked
+        actual_grant = None
+        for line in updated_txn.get("Line", []):
+            detail = line.get("AccountBasedExpenseLineDetail", {})
+            cref = detail.get("CustomerRef")
+            if cref:
+                actual_grant = cref.get("name") or cref.get("value")
+                break
+
+        # Check if any customer_id was requested
+        requested_customer = next(
+            (u.customer_id for u in body.line_updates if u.customer_id), None
+        )
+
         return {
-            "success":    True,
-            "id":         updated_txn.get("Id"),
-            "doc_number": updated_txn.get("DocNumber"),
-            "total":      updated_txn.get("TotalAmt"),
-            "message":    "Transaction updated successfully in QBO.",
+            "success":           True,
+            "id":                updated_txn.get("Id"),
+            "doc_number":        updated_txn.get("DocNumber"),
+            "total":             updated_txn.get("TotalAmt"),
+            "message":           "Transaction updated successfully in QBO.",
+            "actual_grant":      actual_grant,
+            "grant_updated":     (requested_customer is None) or (actual_grant is not None),
         }
     except Exception as e:
         raise HTTPException(502, detail=str(e))

@@ -131,12 +131,19 @@ export function BookkeepingPage() {
         class_id:    e.class_id    ?? null,
         customer_id: e.customer_id ?? null,
       }))
-      await api.bookkeeping.categorize({
+      const res: any = await api.bookkeeping.categorize({
         realm_id:       realm,
         transaction_id: txn.id,
         sync_token:     txn.sync_token,
         line_updates:   lineUpdates,
       })
+      // If QBO returned a different grant than what we sent, warn the user
+      const requestedGrant = lineUpdates.find(l => l.customer_id)?.customer_id
+      if (requestedGrant && res?.actual_grant !== undefined && !res.actual_grant) {
+        setTxnError(p => ({ ...p, [txn.id]: `QBO no aplicó el grant. Respuesta: "${res?.actual_grant ?? 'sin grant'}"` }))
+        setSaving(p => ({ ...p, [txn.id]: false }))
+        return
+      }
       setSaved(p => ({ ...p, [txn.id]: true }))
       // Remove from list after save
       setTimeout(() => {
