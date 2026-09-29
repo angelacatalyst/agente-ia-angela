@@ -480,6 +480,13 @@ class QBOClient:
                 params=self._params(),
                 json=payload,
             )
+            if resp.status_code >= 400:
+                try:
+                    err_body = resp.json()
+                    err_msg = str(err_body.get("Fault", {}).get("Error", err_body))
+                except Exception:
+                    err_msg = resp.text[:500]
+                raise ValueError(f"QBO {resp.status_code}: {err_msg}")
             resp.raise_for_status()
             return resp.json()
 

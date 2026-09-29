@@ -370,7 +370,7 @@ async def categorize_transaction(
             "message":    "Transaction updated successfully in QBO.",
         }
     except Exception as e:
-        raise HTTPException(502, f"Error updating transaction in QBO: {e}")
+        raise HTTPException(502, detail=str(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
