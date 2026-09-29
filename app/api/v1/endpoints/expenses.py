@@ -185,15 +185,12 @@ async def bulk_update_grant(
                     if "BillableStatus" not in detail:
                         detail["BillableStatus"] = "NotBillable"
 
-            # 3. Also set at header level (some QBO clients use this)
-            purchase["CustomerRef"] = {"value": upd.customer_id}
-
-            # 4. Full update (not sparse) — required for bank-feed transactions
+            # 3. Full update (not sparse) — required for bank-feed transactions
             # Remove read-only fields that QBO rejects on write
             for ro_field in ("MetaData", "LinkedTxn", "TxnSource"):
                 purchase.pop(ro_field, None)
 
-            await qbo.update_purchase(upd.expense_id, sync_token, purchase)
+            await qbo.update_purchase(upd.expense_id, sync_token, purchase, sparse=False)
             updated.append({
                 "id":            upd.expense_id,
                 "grant_id":      upd.customer_id,

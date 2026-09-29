@@ -459,10 +459,10 @@ class QBOClient:
         """Fetch a single Purchase by Id."""
         return await self._get(f"purchase/{purchase_id}")
 
-    async def update_purchase(self, purchase_id: str, sync_token: str, updates: dict) -> dict:
+    async def update_purchase(self, purchase_id: str, sync_token: str, updates: dict, sparse: bool = True) -> dict:
         """
-        Sparse-update a QBO Purchase. `updates` is a partial Purchase dict —
-        only the fields present are changed. The full current Purchase must be
+        Update a QBO Purchase. `updates` is a partial Purchase dict (sparse=True)
+        or the full Purchase dict (sparse=False). The full current Purchase must be
         fetched first (to get SyncToken); pass that SyncToken here.
         """
         await self._ensure_token()
@@ -470,9 +470,10 @@ class QBOClient:
         payload = {
             "Id": purchase_id,
             "SyncToken": sync_token,
-            "sparse": True,
             **updates,
         }
+        if sparse:
+            payload["sparse"] = True
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 url,
