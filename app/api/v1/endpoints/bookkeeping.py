@@ -358,6 +358,9 @@ async def categorize_transaction(
     updates: dict = {"Line": updated_lines}
     if body.memo is not None:
         updates["PrivateNote"] = body.memo
+    # PaymentType is required by QBO even in sparse updates
+    if txn.get("PaymentType"):
+        updates["PaymentType"] = txn["PaymentType"]
 
     try:
         result = await qbo.update_purchase(body.transaction_id, body.sync_token, updates)
@@ -425,6 +428,9 @@ async def categorize_batch(
             updates: dict = {"Line": updated_lines}
             if item.memo is not None:
                 updates["PrivateNote"] = item.memo
+            # PaymentType is required by QBO even in sparse updates
+            if txn.get("PaymentType"):
+                updates["PaymentType"] = txn["PaymentType"]
 
             result = await qbo.update_purchase(item.transaction_id, item.sync_token, updates)
             results.append({
