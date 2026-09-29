@@ -187,11 +187,10 @@ async def bulk_update_grant(
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
                 updated_lines.append(line)
 
-            # 3. Sparse update — Line + CustomerRef at header level + PaymentType
-            # QBO may read CustomerRef at Purchase header OR line level depending on transaction type
+            # 3. Sparse update — Line only (CustomerRef is line-level on Purchase, not header-level)
+            # QBO Purchase does NOT support CustomerRef at header level (that's for Invoice/Bill)
             sparse_updates: dict[str, Any] = {
                 "Line": updated_lines,
-                "CustomerRef": {"value": upd.customer_id},  # also set at header level
             }
             if purchase.get("PaymentType"):
                 sparse_updates["PaymentType"] = purchase["PaymentType"]
