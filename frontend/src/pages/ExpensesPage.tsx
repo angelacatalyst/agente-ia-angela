@@ -45,12 +45,14 @@ function SortHeader({
     <button
       onClick={() => onClick(field)}
       className={cn(
-        'flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide transition-colors',
-        active ? 'text-primary-600' : 'text-surface-500 hover:text-surface-700',
+        'flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] font-semibold uppercase tracking-wide transition-all',
+        active
+          ? 'text-primary-700 bg-primary-50'
+          : 'text-surface-500 hover:text-surface-800 hover:bg-surface-100',
       )}
     >
       {label}
-      <Icon size={11} className={active ? 'text-primary-500' : 'text-surface-400'} />
+      <Icon size={13} className={active ? 'text-primary-500' : 'text-surface-400'} />
     </button>
   )
 }
@@ -242,6 +244,26 @@ export function ExpensesPage() {
               />
               <span className="text-sm font-medium text-surface-700">Solo sin grant</span>
             </label>
+
+            {/* Search by vendor or amount — visible once data is loaded */}
+            {expenses.length > 0 && (
+              <div className="relative flex-1 min-w-[200px]">
+                <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Buscar proveedor o monto…"
+                  className="w-full rounded-lg border-2 border-surface-300 bg-white pl-9 pr-8 py-2 text-sm text-surface-800 placeholder-surface-400 focus:outline-none focus:border-primary-500"
+                />
+                {search && (
+                  <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-700">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            )}
+
             <button
               onClick={fetchExpenses}
               disabled={loading || !selectedRealmId}
@@ -318,37 +340,17 @@ export function ExpensesPage() {
         {/* ── Table ── */}
         {expenses.length > 0 && (
           <div className="rounded-xl border border-surface-200 bg-white shadow-sm overflow-hidden">
-            {/* Table toolbar: count + search + refresh */}
-            <div className="flex items-center justify-between border-b border-surface-100 px-4 py-2.5 bg-surface-50 gap-3">
-              <span className="text-xs font-semibold text-surface-500 uppercase tracking-wide shrink-0">
+            {/* Table toolbar: count + refresh */}
+            <div className="flex items-center justify-between border-b border-surface-100 px-4 py-2.5 bg-surface-50">
+              <span className="text-xs font-semibold text-surface-500 uppercase tracking-wide">
                 {displayed.length !== expenses.length
                   ? `${displayed.length} de ${expenses.length} gasto${expenses.length !== 1 ? 's' : ''}`
                   : `${expenses.length} gasto${expenses.length !== 1 ? 's' : ''}`}
+                {search && <span className="ml-2 font-normal text-surface-400">· "{search}"</span>}
               </span>
-
-              {/* Search box */}
-              <div className="relative flex-1 max-w-xs">
-                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  placeholder="Buscar por proveedor o monto…"
-                  className="w-full rounded-lg border border-surface-200 bg-white pl-7 pr-7 py-1.5 text-xs text-surface-800 placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                />
-                {search && (
-                  <button
-                    onClick={() => setSearch('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-600"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
-              </div>
-
               <button
                 onClick={fetchExpenses}
-                className="flex items-center gap-1 text-xs text-surface-500 hover:text-surface-700 transition-colors shrink-0"
+                className="flex items-center gap-1 text-xs text-surface-500 hover:text-surface-700 transition-colors"
               >
                 <RefreshCw size={11} />
                 Actualizar
