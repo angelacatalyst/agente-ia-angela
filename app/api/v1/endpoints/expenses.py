@@ -175,22 +175,24 @@ async def bulk_update_grant(
             purchase: dict[str, Any] = resp.get("Purchase", resp)
             sync_token = purchase.get("SyncToken", "0")
 
-            # 2. Update CustomerRef on every AccountBasedExpenseLineDetail line
+            # 2. Build updated Line array — only modify CustomerRef, preserve everything else
+            updated_lines = []
             for line in purchase.get("Line", []):
                 detail = line.get("AccountBasedExpenseLineDetail")
                 if detail is not None:
-                    detail["CustomerRef"] = {"value": upd.customer_id}
-                    # QBO requires BillableStatus when CustomerRef is set;
-                    # "NotBillable" is the safe default for expense grant tagging.
+                    # Copy detail to avoid mutating the original
+                    detail = {**detail, "CustomerRef": {"value": upd.customer_id}}
                     if "BillableStatus" not in detail:
                         detail["BillableStatus"] = "NotBillable"
+                    line = {**line, "AccountBasedExpenseLineDetail": detail}
+                updated_lines.append(line)
 
-            # 3. Full update (not sparse) — required for bank-feed transactions
-            # Remove read-only fields that QBO rejects on write
-            for ro_field in ("MetaData", "LinkedTxn", "TxnSource"):
-                purchase.pop(ro_field, None)
+            # 3. Sparse update — only send Line + PaymentType (required by QBO)
+            sparse_updates: dict[str, Any] = {"Line": updated_lines}
+            if purchase.get("PaymentType"):
+                sparse_updates["PaymentType"] = purchase["PaymentType"]
 
-            await qbo.update_purchase(upd.expense_id, sync_token, purchase, sparse=False)
+            await qbo.update_purchase(upd.expense_id, sync_token, sparse_updates, sparse=True)
             updated.append({
                 "id":            upd.expense_id,
                 "grant_id":      upd.customer_id,
