@@ -232,7 +232,8 @@ async def bulk_update_grant(
             # Sparse updates silently fail when the transaction already has a sub-customer assigned.
             # QBO read-only fields must be stripped before re-posting.
             _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
-                         "time", "type", "TransactionLocationType"}
+                         "time", "type", "TransactionLocationType",
+                         "PurchaseEx", "CustomField"}
             full_payload: dict[str, Any] = {
                 k: v for k, v in purchase.items() if k not in _READONLY
             }
