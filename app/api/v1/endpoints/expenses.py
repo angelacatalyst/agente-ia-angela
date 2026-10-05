@@ -136,6 +136,28 @@ async def list_customers(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /expenses/debug/{id} — return raw QBO Purchase object (temporary debug)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/debug/{purchase_id}")
+async def debug_purchase(
+    purchase_id: str,
+    realm_id: str = Query(...),
+    db: DbDep = None,
+) -> dict:
+    """Return the raw QBO Purchase object for inspection."""
+    try:
+        qbo = await get_qbo_client_for_realm(realm_id, db)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        resp = await qbo.get_purchase(purchase_id)
+        return resp
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PATCH /expenses/bulk-update-grant — assign grant to multiple expenses
 # ─────────────────────────────────────────────────────────────────────────────
 
