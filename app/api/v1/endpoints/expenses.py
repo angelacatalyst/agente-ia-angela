@@ -211,31 +211,15 @@ async def bulk_update_grant(
 
     async def _update_one(upd: GrantUpdate) -> None:
         try:
-            # 1. Fetch current purchase
+            # 1. Fetch current purchase (need full object for non-sparse update)
             resp = await qbo.get_purchase(upd.expense_id)
             purchase: dict[str, Any] = resp.get("Purchase", resp)
             sync_token = purchase.get("SyncToken", "0")
 
+            # Fields QBO rejects if included in an update payload
             _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
                          "time", "type", "TransactionLocationType",
                          "PurchaseEx", "CustomField"}
-
-            def _build_payload(src: dict, lines: list) -> dict[str, Any]:
-                payload = {k: v for k, v in src.items() if k not in _READONLY}
-                payload["Line"] = lines
-                return payload
-
-            def _lines_without_customer(src: dict) -> list:
-                result = []
-                for line in src.get("Line", []):
-                    detail = line.get("AccountBasedExpenseLineDetail")
-                    if detail is not None:
-                        # Explicitly set CustomerRef to empty value to clear it in QBO
-                        # (omitting the field in sparse update means "no change", not "clear")
-                        detail = {**detail, "CustomerRef": {"value": ""}}
-                        line = {**line, "AccountBasedExpenseLineDetail": detail}
-                    result.append(line)
-                return result
 
             def _lines_with_customer(src: dict, cid: str) -> list:
                 result = []
@@ -249,39 +233,14 @@ async def bulk_update_grant(
                     result.append(line)
                 return result
 
-            # 2. Step A — clear CustomerRef using sparse update (only send Line array)
-            clear_sparse: dict[str, Any] = {"Line": _lines_without_customer(purchase)}
-            if purchase.get("PaymentType"):
-                clear_sparse["PaymentType"] = purchase["PaymentType"]
-            await qbo.update_purchase(upd.expense_id, sync_token, clear_sparse, sparse=True)
+            # 2. Full update (non-sparse) — sends the entire Purchase object so QBO
+            #    replaces CustomerRef on all lines, even when one already exists.
+            #    Sparse update cannot overwrite an existing CustomerRef reliably.
+            payload = {k: v for k, v in purchase.items() if k not in _READONLY}
+            payload["Line"] = _lines_with_customer(purchase, upd.customer_id)
+            await qbo.update_purchase(upd.expense_id, sync_token, payload, sparse=False)
 
-            # 3. Re-fetch to verify clear and get new SyncToken
-            mid_resp = await qbo.get_purchase(upd.expense_id)
-            mid_purchase: dict[str, Any] = mid_resp.get("Purchase", mid_resp)
-            mid_sync_token = mid_purchase.get("SyncToken", "0")
-
-            # Check if clear actually worked
-            mid_cref = None
-            for line in mid_purchase.get("Line", []):
-                mid_cref = line.get("AccountBasedExpenseLineDetail", {}).get("CustomerRef")
-                if mid_cref:
-                    break
-
-            if mid_cref:
-                errors.append(
-                    f"Paso A (clear) falló para {upd.expense_id}: "
-                    f"QBO no eliminó el grant '{mid_cref.get('name')}'. "
-                    f"Esta transacción puede estar bloqueada en QBO."
-                )
-                return
-
-            # 4. Step B — assign new CustomerRef using sparse update
-            set_sparse: dict[str, Any] = {"Line": _lines_with_customer(mid_purchase, upd.customer_id)}
-            if mid_purchase.get("PaymentType"):
-                set_sparse["PaymentType"] = mid_purchase["PaymentType"]
-            await qbo.update_purchase(upd.expense_id, mid_sync_token, set_sparse, sparse=True)
-
-            # 5. Re-fetch from QBO to verify the change actually took effect
+            # 3. Re-fetch to verify the change took effect
             verify_resp = await qbo.get_purchase(upd.expense_id)
             verify_purchase = verify_resp.get("Purchase", verify_resp)
 
@@ -303,13 +262,12 @@ async def bulk_update_grant(
                 )
             else:
                 updated.append({
-                    "id":            upd.expense_id,
-                    "grant_id":      upd.customer_id,
-                    "grant_name":    upd.customer_name,
-                    "actual_grant":  actual_name,
+                    "id":           upd.expense_id,
+                    "grant_id":     upd.customer_id,
+                    "grant_name":   upd.customer_name,
+                    "actual_grant": actual_name,
                 })
         except Exception as e:
-            # Include full error detail so the UI can display it
             errors.append(str(e))
 
     # Run up to 5 updates concurrently

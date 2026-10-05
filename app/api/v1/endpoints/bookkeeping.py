@@ -336,6 +336,10 @@ async def categorize_transaction(
     except Exception as e:
         raise HTTPException(502, f"Error fetching transaction: {e}")
 
+    # Fields QBO rejects in update payloads
+    _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
+                 "time", "type", "TransactionLocationType", "PurchaseEx", "CustomField"}
+
     # Build updated lines
     line_update_map = {u.line_id: u for u in body.line_updates}
     updated_lines = []
@@ -343,7 +347,7 @@ async def categorize_transaction(
         lid = str(line.get("Id", ""))
         if lid in line_update_map and line.get("DetailType") == "AccountBasedExpenseLineDetail":
             upd = line_update_map[lid]
-            detail = line.get("AccountBasedExpenseLineDetail", {})
+            detail = dict(line.get("AccountBasedExpenseLineDetail", {}))
             if upd.account_id:
                 detail["AccountRef"] = {"value": upd.account_id}
             if upd.class_id:
@@ -354,15 +358,15 @@ async def categorize_transaction(
             line = {**line, "AccountBasedExpenseLineDetail": detail}
         updated_lines.append(line)
 
-    updates: dict = {"Line": updated_lines}
+    # Full update (non-sparse) — required to reliably overwrite an existing CustomerRef.
+    # Sparse update cannot change a CustomerRef that is already set in QBO.
+    updates: dict = {k: v for k, v in txn.items() if k not in _READONLY}
+    updates["Line"] = updated_lines
     if body.memo is not None:
         updates["PrivateNote"] = body.memo
-    # PaymentType is required by QBO even in sparse updates
-    if txn.get("PaymentType"):
-        updates["PaymentType"] = txn["PaymentType"]
 
     try:
-        result = await qbo.update_purchase(body.transaction_id, body.sync_token, updates)
+        result = await qbo.update_purchase(body.transaction_id, body.sync_token, updates, sparse=False)
         updated_txn = result.get("Purchase", {})
 
         # Extract the actual CustomerRef from QBO's response to verify the update worked
@@ -420,6 +424,9 @@ async def categorize_batch(
     results = []
     errors  = []
 
+    _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
+                 "time", "type", "TransactionLocationType", "PurchaseEx", "CustomField"}
+
     for item in body.items:
         try:
             txn_resp = await qbo.get_purchase(item.transaction_id)
@@ -431,7 +438,7 @@ async def categorize_batch(
                 lid = str(line.get("Id", ""))
                 if lid in line_update_map and line.get("DetailType") == "AccountBasedExpenseLineDetail":
                     upd = line_update_map[lid]
-                    detail = line.get("AccountBasedExpenseLineDetail", {})
+                    detail = dict(line.get("AccountBasedExpenseLineDetail", {}))
                     if upd.account_id:
                         detail["AccountRef"] = {"value": upd.account_id}
                     if upd.class_id:
@@ -442,14 +449,13 @@ async def categorize_batch(
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
                 updated_lines.append(line)
 
-            updates: dict = {"Line": updated_lines}
+            # Full update (non-sparse) — required to reliably overwrite an existing CustomerRef
+            updates: dict = {k: v for k, v in txn.items() if k not in _READONLY}
+            updates["Line"] = updated_lines
             if item.memo is not None:
                 updates["PrivateNote"] = item.memo
-            # PaymentType is required by QBO even in sparse updates
-            if txn.get("PaymentType"):
-                updates["PaymentType"] = txn["PaymentType"]
 
-            result = await qbo.update_purchase(item.transaction_id, item.sync_token, updates)
+            result = await qbo.update_purchase(item.transaction_id, item.sync_token, updates, sparse=False)
             results.append({
                 "transaction_id": item.transaction_id,
                 "success": True,
