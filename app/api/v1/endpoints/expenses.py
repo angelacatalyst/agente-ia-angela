@@ -256,19 +256,12 @@ async def bulk_update_grant(
                     break
 
             if actual_id != upd.customer_id:
-                import json as _json
-                # Dump full purchase keys + line CustomerRef for diagnosis
-                top_keys = list(purchase.keys())
-                line_crefs = [
-                    line.get("AccountBasedExpenseLineDetail", {}).get("CustomerRef")
-                    for line in purchase.get("Line", [])
-                ]
+                purchase_ex = purchase.get("PurchaseEx")
                 errors.append(
                     f"QBO no aplicó el cambio de grant para {upd.expense_id}. "
                     f"Enviado: {upd.customer_name!r} ({upd.customer_id}), "
                     f"QBO tiene: {actual_name!r} ({actual_id}). "
-                    f"Campos del Purchase: {top_keys}. "
-                    f"CustomerRef en líneas (original): {line_crefs}."
+                    f"PurchaseEx: {str(purchase_ex)[:400]}."
                 )
             else:
                 updated.append({
