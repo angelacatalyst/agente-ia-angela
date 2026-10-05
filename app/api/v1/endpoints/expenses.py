@@ -187,15 +187,17 @@ async def bulk_update_grant(
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
                 updated_lines.append(line)
 
-            # 3. Sparse update — Line only (CustomerRef is line-level on Purchase, not header-level)
-            # QBO Purchase does NOT support CustomerRef at header level (that's for Invoice/Bill)
-            sparse_updates: dict[str, Any] = {
-                "Line": updated_lines,
+            # 3. Full update — send entire Purchase back with updated lines.
+            # Sparse updates silently fail when the transaction already has a sub-customer assigned.
+            # QBO read-only fields must be stripped before re-posting.
+            _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
+                         "time", "type", "TransactionLocationType"}
+            full_payload: dict[str, Any] = {
+                k: v for k, v in purchase.items() if k not in _READONLY
             }
-            if purchase.get("PaymentType"):
-                sparse_updates["PaymentType"] = purchase["PaymentType"]
+            full_payload["Line"] = updated_lines
 
-            await qbo.update_purchase(upd.expense_id, sync_token, sparse_updates, sparse=True)
+            await qbo.update_purchase(upd.expense_id, sync_token, full_payload, sparse=False)
 
             # Re-fetch from QBO to verify the change actually took effect
             verify_resp = await qbo.get_purchase(upd.expense_id)
