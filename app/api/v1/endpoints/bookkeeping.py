@@ -355,6 +355,9 @@ async def categorize_transaction(
             # NOTE: we intentionally never clear ClassRef here — omitting class_id means "leave it unchanged"
             if upd.customer_id:
                 detail["CustomerRef"] = {"value": upd.customer_id}
+                # Strip ProjectRef: QBO uses it to override CustomerRef, which would
+                # silently revert our grant change if the project belongs to a different customer.
+                line = {k: v for k, v in line.items() if k != "ProjectRef"}
             line = {**line, "AccountBasedExpenseLineDetail": detail}
         updated_lines.append(line)
 
@@ -446,6 +449,9 @@ async def categorize_batch(
                     # NOTE: we intentionally never clear ClassRef — omitting class_id means "leave it unchanged"
                     if upd.customer_id:
                         detail["CustomerRef"] = {"value": upd.customer_id}
+                        # Strip ProjectRef: QBO uses it to override CustomerRef, which would
+                        # silently revert our grant change if the project belongs to a different customer.
+                        line = {k: v for k, v in line.items() if k != "ProjectRef"}
                     line = {**line, "AccountBasedExpenseLineDetail": detail}
                 updated_lines.append(line)
 

@@ -229,6 +229,9 @@ async def bulk_update_grant(
                         detail = {**detail, "CustomerRef": {"value": cid}}
                         if "BillableStatus" not in detail:
                             detail["BillableStatus"] = "NotBillable"
+                        # Strip ProjectRef: QBO uses it to override CustomerRef, which would
+                        # silently revert our grant change if the project belongs to a different customer.
+                        line = {k: v for k, v in line.items() if k != "ProjectRef"}
                         line = {**line, "AccountBasedExpenseLineDetail": detail}
                     result.append(line)
                 return result
