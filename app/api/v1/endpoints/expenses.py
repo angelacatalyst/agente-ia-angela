@@ -216,32 +216,51 @@ async def bulk_update_grant(
             purchase: dict[str, Any] = resp.get("Purchase", resp)
             sync_token = purchase.get("SyncToken", "0")
 
-            # 2. Build updated Line array — only modify CustomerRef, preserve everything else
-            updated_lines = []
-            for line in purchase.get("Line", []):
-                detail = line.get("AccountBasedExpenseLineDetail")
-                if detail is not None:
-                    # Copy detail to avoid mutating the original
-                    detail = {**detail, "CustomerRef": {"value": upd.customer_id}}
-                    if "BillableStatus" not in detail:
-                        detail["BillableStatus"] = "NotBillable"
-                    line = {**line, "AccountBasedExpenseLineDetail": detail}
-                updated_lines.append(line)
-
-            # 3. Full update — send entire Purchase back with updated lines.
-            # Sparse updates silently fail when the transaction already has a sub-customer assigned.
-            # QBO read-only fields must be stripped before re-posting.
             _READONLY = {"MetaData", "domain", "sparse", "status", "Id", "SyncToken",
                          "time", "type", "TransactionLocationType",
                          "PurchaseEx", "CustomField"}
-            full_payload: dict[str, Any] = {
-                k: v for k, v in purchase.items() if k not in _READONLY
-            }
-            full_payload["Line"] = updated_lines
 
-            await qbo.update_purchase(upd.expense_id, sync_token, full_payload, sparse=False)
+            def _build_payload(src: dict, lines: list) -> dict[str, Any]:
+                payload = {k: v for k, v in src.items() if k not in _READONLY}
+                payload["Line"] = lines
+                return payload
 
-            # Re-fetch from QBO to verify the change actually took effect
+            def _lines_without_customer(src: dict) -> list:
+                result = []
+                for line in src.get("Line", []):
+                    detail = line.get("AccountBasedExpenseLineDetail")
+                    if detail is not None:
+                        detail = {k: v for k, v in detail.items() if k != "CustomerRef"}
+                        line = {**line, "AccountBasedExpenseLineDetail": detail}
+                    result.append(line)
+                return result
+
+            def _lines_with_customer(src: dict, cid: str) -> list:
+                result = []
+                for line in src.get("Line", []):
+                    detail = line.get("AccountBasedExpenseLineDetail")
+                    if detail is not None:
+                        detail = {**detail, "CustomerRef": {"value": cid}}
+                        if "BillableStatus" not in detail:
+                            detail["BillableStatus"] = "NotBillable"
+                        line = {**line, "AccountBasedExpenseLineDetail": detail}
+                    result.append(line)
+                return result
+
+            # 2. Step A — clear CustomerRef (delete existing grant)
+            clear_payload = _build_payload(purchase, _lines_without_customer(purchase))
+            await qbo.update_purchase(upd.expense_id, sync_token, clear_payload, sparse=False)
+
+            # 3. Re-fetch to get updated SyncToken after clear
+            mid_resp = await qbo.get_purchase(upd.expense_id)
+            mid_purchase: dict[str, Any] = mid_resp.get("Purchase", mid_resp)
+            mid_sync_token = mid_purchase.get("SyncToken", "0")
+
+            # 4. Step B — assign new CustomerRef
+            set_payload = _build_payload(mid_purchase, _lines_with_customer(mid_purchase, upd.customer_id))
+            await qbo.update_purchase(upd.expense_id, mid_sync_token, set_payload, sparse=False)
+
+            # 5. Re-fetch from QBO to verify the change actually took effect
             verify_resp = await qbo.get_purchase(upd.expense_id)
             verify_purchase = verify_resp.get("Purchase", verify_resp)
 
@@ -256,12 +275,10 @@ async def bulk_update_grant(
                     break
 
             if actual_id != upd.customer_id:
-                purchase_ex = purchase.get("PurchaseEx")
                 errors.append(
                     f"QBO no aplicó el cambio de grant para {upd.expense_id}. "
                     f"Enviado: {upd.customer_name!r} ({upd.customer_id}), "
-                    f"QBO tiene: {actual_name!r} ({actual_id}). "
-                    f"PurchaseEx: {str(purchase_ex)[:400]}."
+                    f"QBO tiene: {actual_name!r} ({actual_id})."
                 )
             else:
                 updated.append({
