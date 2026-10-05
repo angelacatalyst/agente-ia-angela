@@ -161,9 +161,10 @@ async def debug_purchase(
         raise HTTPException(status_code=400, detail=str(e))
     try:
         resp = await qbo.get_purchase(purchase_id)
-        return resp
+        return {"realm_id": realm_id, "purchase": resp}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        import traceback
+        raise HTTPException(status_code=502, detail={"realm_id": realm_id, "error": str(e), "trace": traceback.format_exc()[-500:]})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
