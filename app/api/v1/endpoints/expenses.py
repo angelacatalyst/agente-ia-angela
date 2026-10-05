@@ -214,11 +214,17 @@ async def bulk_update_grant(
                     break
 
             if actual_id != upd.customer_id:
+                # Collect line detail types for debugging
+                line_types = [
+                    next((k for k in line if k.endswith("LineDetail")), "?")
+                    for line in verify_purchase.get("Line", [])
+                ]
                 errors.append(
                     f"QBO no aplicó el cambio de grant para {upd.expense_id}. "
                     f"Enviado: {upd.customer_name!r} ({upd.customer_id}), "
                     f"QBO tiene: {actual_name!r} ({actual_id}). "
-                    f"Esta transacción puede estar bloqueada por el bank feed de QBO."
+                    f"Tipos de línea: {line_types}. "
+                    f"Líneas en payload: {len(updated_lines)}, modificadas: {sum(1 for l in updated_lines if l.get('AccountBasedExpenseLineDetail', {}).get('CustomerRef', {}).get('value') == upd.customer_id)}."
                 )
             else:
                 updated.append({
