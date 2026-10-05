@@ -230,7 +230,9 @@ async def bulk_update_grant(
                 for line in src.get("Line", []):
                     detail = line.get("AccountBasedExpenseLineDetail")
                     if detail is not None:
-                        detail = {k: v for k, v in detail.items() if k != "CustomerRef"}
+                        # Explicitly set CustomerRef to empty value to clear it in QBO
+                        # (omitting the field in sparse update means "no change", not "clear")
+                        detail = {**detail, "CustomerRef": {"value": ""}}
                         line = {**line, "AccountBasedExpenseLineDetail": detail}
                     result.append(line)
                 return result
