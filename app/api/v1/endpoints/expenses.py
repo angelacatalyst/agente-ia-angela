@@ -247,18 +247,37 @@ async def bulk_update_grant(
                     result.append(line)
                 return result
 
-            # 2. Step A — clear CustomerRef (delete existing grant)
-            clear_payload = _build_payload(purchase, _lines_without_customer(purchase))
-            await qbo.update_purchase(upd.expense_id, sync_token, clear_payload, sparse=False)
+            # 2. Step A — clear CustomerRef using sparse update (only send Line array)
+            clear_sparse: dict[str, Any] = {"Line": _lines_without_customer(purchase)}
+            if purchase.get("PaymentType"):
+                clear_sparse["PaymentType"] = purchase["PaymentType"]
+            await qbo.update_purchase(upd.expense_id, sync_token, clear_sparse, sparse=True)
 
-            # 3. Re-fetch to get updated SyncToken after clear
+            # 3. Re-fetch to verify clear and get new SyncToken
             mid_resp = await qbo.get_purchase(upd.expense_id)
             mid_purchase: dict[str, Any] = mid_resp.get("Purchase", mid_resp)
             mid_sync_token = mid_purchase.get("SyncToken", "0")
 
-            # 4. Step B — assign new CustomerRef
-            set_payload = _build_payload(mid_purchase, _lines_with_customer(mid_purchase, upd.customer_id))
-            await qbo.update_purchase(upd.expense_id, mid_sync_token, set_payload, sparse=False)
+            # Check if clear actually worked
+            mid_cref = None
+            for line in mid_purchase.get("Line", []):
+                mid_cref = line.get("AccountBasedExpenseLineDetail", {}).get("CustomerRef")
+                if mid_cref:
+                    break
+
+            if mid_cref:
+                errors.append(
+                    f"Paso A (clear) falló para {upd.expense_id}: "
+                    f"QBO no eliminó el grant '{mid_cref.get('name')}'. "
+                    f"Esta transacción puede estar bloqueada en QBO."
+                )
+                return
+
+            # 4. Step B — assign new CustomerRef using sparse update
+            set_sparse: dict[str, Any] = {"Line": _lines_with_customer(mid_purchase, upd.customer_id)}
+            if mid_purchase.get("PaymentType"):
+                set_sparse["PaymentType"] = mid_purchase["PaymentType"]
+            await qbo.update_purchase(upd.expense_id, mid_sync_token, set_sparse, sparse=True)
 
             # 5. Re-fetch from QBO to verify the change actually took effect
             verify_resp = await qbo.get_purchase(upd.expense_id)
