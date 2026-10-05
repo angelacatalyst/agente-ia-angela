@@ -159,12 +159,21 @@ async def debug_purchase(
         qbo = await get_qbo_client_for_realm(realm_id, db)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    import httpx
     try:
         resp = await qbo.get_purchase(purchase_id)
         return {"realm_id": realm_id, "purchase": resp}
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=502, detail={"realm_id": realm_id, "error": str(e), "trace": traceback.format_exc()[-500:]})
+        # Unpack tenacity RetryError to get the underlying cause
+        cause = getattr(e, "__cause__", None) or getattr(e, "last_attempt", None)
+        if cause and hasattr(cause, "exception"):
+            cause = cause.exception()
+        http_info = {}
+        if isinstance(cause, httpx.HTTPStatusError):
+            http_info = {"http_status": cause.response.status_code, "body": cause.response.text[:1000]}
+        elif isinstance(e, httpx.HTTPStatusError):
+            http_info = {"http_status": e.response.status_code, "body": e.response.text[:1000]}
+        raise HTTPException(status_code=502, detail={"realm_id": realm_id, "error": str(e)[:300], **http_info})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
