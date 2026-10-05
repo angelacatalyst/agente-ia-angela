@@ -142,10 +142,19 @@ async def list_customers(
 @router.get("/debug/{purchase_id}")
 async def debug_purchase(
     purchase_id: str,
-    realm_id: str = Query(...),
+    realm_id: str = Query(None),
     db: DbDep = None,
 ) -> dict:
     """Return the raw QBO Purchase object for inspection."""
+    from sqlalchemy import select as sa_select
+    from app.models.database import QBOToken
+    # Auto-detect realm_id if not provided
+    if not realm_id:
+        result = await db.execute(sa_select(QBOToken).limit(1))
+        token = result.scalar_one_or_none()
+        if not token:
+            raise HTTPException(status_code=400, detail="No QBO token found")
+        realm_id = token.realm_id
     try:
         qbo = await get_qbo_client_for_realm(realm_id, db)
     except Exception as e:
