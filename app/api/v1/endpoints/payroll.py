@@ -226,14 +226,14 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 },
             },
         ],
-        # Pool 1: Mayor Cava (May 2026+) covers SBRC, Negocios, Capital Readiness
-        #          then Truist Foundation takes over if Mayor Cava runs out
+        # Pool 1: Mayor Cava (May–Sep 2026) covers SBRC, Negocios, Capital Readiness
+        #          From Oct 2026 onward Mayor Cava ends → Truist Foundation covers these classes
         # Pool 2: ILB, CPA, Tradicion en Accion → Truist Foundation only (Mayor Cava does NOT apply)
         "grant_rules": [
             {
                 "pool_classes": ["SBRC", "Negocios", "Capital Readiness"],
                 "waterfall": [
-                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01"},
+                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 10738.30, "start_date": "2026-05-01", "end_date": "2026-09-30"},
                     {"name": "Truist Foundation", "annual_budget": 100000.00},
                 ],
             },
@@ -314,7 +314,8 @@ def _parse_gusto(data: bytes) -> list[dict]:
         r0 = str(row[0]).strip() if row[0] else ""
         r1 = str(row[1]).strip() if row[1] else ""
 
-        if r0 == "Payroll period":
+        if r0 in ("Payroll period", "Pay period"):
+            # Gusto renamed "Payroll period" → "Pay period" in newer exports
             current = {"period": r1.strip(), "payday": None, "employees": []}
             header_map = {}
         elif r0 == "Pay day" and current is not None:
@@ -336,8 +337,8 @@ def _parse_gusto(data: bytes) -> list[dict]:
         elif r0 == "Last Name" and current is not None:
             header_map = {str(c).strip(): i for i, c in enumerate(row) if c is not None}
         elif current is not None and r0 not in (
-            "", "Payroll period", "Pay day", "Last Name",
-            "Payroll Totals", "Employee Earnings",
+            "", "Payroll period", "Pay period", "Pay day", "Last Name",
+            "Payroll Totals", "Employee Earnings", "Regular", "Dismissal",
         ):
             gross = _hget("Gross Earnings", 7)
             if not r0 or gross == 0:
@@ -427,9 +428,12 @@ def _apply_waterfall(periods: list[dict]) -> tuple[list[dict], dict]:
 
                 for g in pool["waterfall"]:
                     gname = g["name"]
-                    # Respect start_date: skip grant if period payday is before its start
+                    # Respect start_date / end_date: skip grant outside its active window
                     g_start = g.get("start_date")
                     if g_start and period_payday < g_start:
+                        continue
+                    g_end = g.get("end_date")
+                    if g_end and period_payday > g_end:
                         continue
                     available = budget_remaining[key].get(gname, 0.0)
                     if available <= 0 or remaining <= 0:
