@@ -346,18 +346,17 @@ async def run_assessment(
                 full = resp.get("Account", resp)
                 enriched = {**acct, **full}
                 logger.info(
-                    "QBO account GET",
-                    account_id=acct_id,
-                    account_name=acct_name,
-                    last_rec=enriched.get("LastReconcileDate"),
-                    feed_type=enriched.get("FeedAccountType"),
-                    conn_status=enriched.get("ConnectionStatus"),
-                    fields=list(full.keys())[:20],
+                    "QBO account GET: id=%s name=%s last_rec=%s feed_type=%s conn_status=%s fields=%s",
+                    acct_id, acct_name,
+                    enriched.get("LastReconcileDate"),
+                    enriched.get("FeedAccountType"),
+                    enriched.get("ConnectionStatus"),
+                    list(full.keys())[:20],
                 )
                 return enriched
             return acct
         except Exception as exc:
-            logger.warning("QBO account GET failed", account_id=acct_id, account_name=acct_name, error=str(exc))
+            logger.warning("QBO account GET failed: id=%s name=%s error=%s", acct_id, acct_name, exc)
             return acct
 
     async def _get_recon_report(acct: dict) -> dict:
@@ -370,15 +369,13 @@ async def run_assessment(
             end_period = (result.get("Header", {}).get("EndPeriod", "") or
                           result.get("Header", {}).get("end_date", "") or "")
             logger.info(
-                "QBO recon report",
-                account_id=acct_id,
-                account_name=acct_name,
-                end_period=end_period,
-                header_keys=list(result.get("Header", {}).keys()),
+                "QBO recon report: id=%s name=%s end_period=%s header_keys=%s",
+                acct_id, acct_name, end_period,
+                list(result.get("Header", {}).keys()),
             )
             return result
         except Exception as exc:
-            logger.warning("QBO recon report failed", account_id=acct_id, account_name=acct_name, error=str(exc))
+            logger.warning("QBO recon report failed: id=%s name=%s error=%s", acct_id, acct_name, exc)
             return {}
 
     _n_bank = min(6, len(bank_accounts))
@@ -399,19 +396,17 @@ async def run_assessment(
 
     # Log summary of BankTransaction query
     logger.info(
-        "QBO BankTransaction query result",
-        count=len(bank_transactions_for_review) if isinstance(bank_transactions_for_review, list) else 0,
-        sample=(bank_transactions_for_review[:2] if isinstance(bank_transactions_for_review, list) else bank_transactions_for_review),
+        "QBO BankTransaction query result: count=%s",
+        len(bank_transactions_for_review) if isinstance(bank_transactions_for_review, list) else 0,
     )
     # Log enriched bank account fields for debugging
     for _ba in bank_accounts[:6]:
         logger.info(
-            "Enriched bank account",
-            name=_ba.get("Name"),
-            id=_ba.get("Id"),
-            last_rec=_ba.get("LastReconcileDate"),
-            feed=_ba.get("FeedAccountType"),
-            conn=_ba.get("ConnectionStatus"),
+            "Enriched bank account: name=%s id=%s last_rec=%s feed=%s conn=%s",
+            _ba.get("Name"), _ba.get("Id"),
+            _ba.get("LastReconcileDate"),
+            _ba.get("FeedAccountType"),
+            _ba.get("ConnectionStatus"),
         )
 
     # ── Parse each reconciliation report ─────────────────────────────────────
