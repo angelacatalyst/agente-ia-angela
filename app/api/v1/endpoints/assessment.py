@@ -391,16 +391,34 @@ async def run_assessment(
             return {}
 
     _n_bank = min(8, len(bank_accounts))  # fetch up to 8 accounts for enrichment
-    # Build all tasks: account GETs, recon reports, then BankTransaction query
+
+    async def _get_account_gl(acct: dict) -> dict:
+        """Fetch GeneralLedger report for one account to get real transaction stats."""
+        acct_id = acct.get("Id", "?")
+        acct_name = acct.get("Name", "?")
+        try:
+            result = await client._get(
+                "reports/GeneralLedger",
+                {"start_date": period_from, "end_date": period_to, "account": acct_id},
+            )
+            logger.info("QBO GL report fetched: id=%s name=%s", acct_id, acct_name)
+            return result
+        except Exception as exc:
+            logger.warning("QBO GL report failed: id=%s name=%s error=%s", acct_id, acct_name, exc)
+            return {}
+
+    # Build all tasks: account GETs, recon reports, GL reports per account, BankTransaction query
     _bank_tasks = (
         [_get_full_account(a) for a in bank_accounts[:_n_bank]]
         + [_get_recon_report(a) for a in bank_accounts[:_n_bank]]
-        + [safe_fetch(client._query("SELECT * FROM BankTransaction MAXRESULTS 500"), "bank_txns", [])]
+        + [_get_account_gl(a) for a in bank_accounts[:_n_bank]]
+        + [safe_fetch(client._query("SELECT * FROM Purchase WHERE AccountRef IS NOT NULL MAXRESULTS 1000"), "bank_txns", [])]
     )
     _bank_results = await asyncio.gather(*_bank_tasks)
 
     enriched_bank_accounts = list(_bank_results[:_n_bank]) if _n_bank > 0 else bank_accounts
     recon_reports = list(_bank_results[_n_bank: _n_bank * 2])
+    gl_reports_by_idx = list(_bank_results[_n_bank * 2: _n_bank * 3])
     bank_transactions_for_review = _bank_results[-1] if _bank_tasks else []
 
     # Replace bank_accounts with enriched data
@@ -448,6 +466,58 @@ async def run_assessment(
         return result
 
     recon_info_by_idx = [_parse_recon_report(r) for r in recon_reports]
+
+    # ── Parse GeneralLedger reports for per-account transaction stats ─────────
+    def _parse_gl_report(report: dict) -> dict:
+        """Extract txn count, date range, and net amount from a GL report for one account."""
+        result: dict = {"txn_count": 0, "first_date": None, "last_date": None,
+                        "total_debits": 0.0, "total_credits": 0.0, "net_amount": 0.0}
+        if not report or not isinstance(report, dict):
+            return result
+
+        # Walk all rows recursively to find Data rows
+        def _walk(rows_data):
+            for row in rows_data:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("type") == "Data":
+                    cols = row.get("ColData", [])
+                    # GL columns: Date, Type, Num, Name, Memo, Split, Amount, Balance
+                    # Skip summary/total rows (no date)
+                    date_val = cols[0].get("value", "") if len(cols) > 0 else ""
+                    if not date_val or not date_val[0].isdigit():
+                        continue
+                    result["txn_count"] += 1
+                    if result["first_date"] is None or date_val < result["first_date"]:
+                        result["first_date"] = date_val
+                    if result["last_date"] is None or date_val > result["last_date"]:
+                        result["last_date"] = date_val
+                    # Amount column (index varies, try 6 then 4)
+                    for amt_idx in (6, 5, 4):
+                        if len(cols) > amt_idx:
+                            try:
+                                amt = float(cols[amt_idx].get("value", "0") or "0")
+                                if amt > 0:
+                                    result["total_debits"] += amt
+                                else:
+                                    result["total_credits"] += abs(amt)
+                                result["net_amount"] += amt
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                # Recurse into nested sections
+                if "Rows" in row:
+                    _walk(row["Rows"].get("Row", []))
+
+        top_rows = report.get("Rows", {}).get("Row", [])
+        _walk(top_rows)
+        logger.info(
+            "GL parsed: txn_count=%s first=%s last=%s net=%.2f",
+            result["txn_count"], result["first_date"], result["last_date"], result["net_amount"],
+        )
+        return result
+
+    gl_stats_by_idx = [_parse_gl_report(r) for r in gl_reports_by_idx]
 
     # ── Group BankTransaction records by AccountRef for per-account pending count ──
     # If BankTransaction query is supported, this gives us which accounts are connected
@@ -563,6 +633,33 @@ async def run_assessment(
         if _bal is not None:
             ws_bank[f"B{i}"].value = f"${_bal:,.2f}" if _bal >= 0 else f"(${abs(_bal):,.2f})"
 
+        # ── GL transaction stats for this account ────────────────────────────
+        _gl = gl_stats_by_idx[_acct_idx] if _acct_idx < len(gl_stats_by_idx) else {}
+        _gl_count = _gl.get("txn_count", 0)
+        _gl_first = _gl.get("first_date") or ""
+        _gl_last = _gl.get("last_date") or ""
+        _gl_debits = _gl.get("total_debits", 0.0)
+        _gl_credits = _gl.get("total_credits", 0.0)
+        _gl_net = _gl.get("net_amount", 0.0)
+
+        def _gl_summary_line() -> str:
+            """Build a one-line transaction volume summary from GL stats."""
+            if not _gl_count:
+                return "No transactions found in QBO General Ledger for the period."
+            date_range = ""
+            if _gl_first and _gl_last:
+                try:
+                    d1 = _date_cls.fromisoformat(_gl_first[:10]).strftime("%m/%d/%Y")
+                    d2 = _date_cls.fromisoformat(_gl_last[:10]).strftime("%m/%d/%Y")
+                    date_range = f" | Date range: {d1} – {d2}"
+                except Exception:
+                    date_range = f" | Date range: {_gl_first} – {_gl_last}"
+            net_str = f"${_gl_net:,.2f}" if _gl_net >= 0 else f"(${abs(_gl_net):,.2f})"
+            return (
+                f"{_gl_count} transaction(s) posted{date_range} | "
+                f"Debits: ${_gl_debits:,.2f} / Credits: ${_gl_credits:,.2f} | Net: {net_str}"
+            )
+
         # ── Reconciliation date: prefer individual GET field, then recon report header ──
         _recon_info = recon_info_by_idx[_acct_idx] if _acct_idx < len(recon_info_by_idx) else {}
         last_rec = (
@@ -582,22 +679,26 @@ async def run_assessment(
                 if days_since > 45:
                     old_rec_accounts.append(f"{name} (last: {d.strftime('%m/%d/%Y')})")
 
-                # Column J — uncleared items
+                # Column J — uncleared items + GL transaction volume context
+                _gl_line = _gl_summary_line()
                 if _uncleared_from_report > 0:
                     ws_bank[f"J{i}"].value = (
                         f"{_uncleared_from_report} uncleared transaction(s) found in reconciliation report "
                         f"(last reconciled {days_since} days ago). "
-                        "Review in QBO Accounting > Reconcile > History to clear old items."
+                        "Review in QBO Accounting > Reconcile > History to clear old items.\n"
+                        f"Transaction volume: {_gl_line}"
                     )
                 elif days_since > 30:
                     ws_bank[f"J{i}"].value = (
                         f"Possible — last reconciled {days_since} days ago. "
-                        "Run Reconcile > History to review uncleared items older than 30 days."
+                        "Run Reconcile > History to review uncleared items older than 30 days.\n"
+                        f"Transaction volume: {_gl_line}"
                     )
                 else:
                     ws_bank[f"J{i}"].value = (
                         "Likely none — reconciled within last 30 days. "
-                        "Verify in QBO Accounting > Reconcile > History."
+                        "Verify in QBO Accounting > Reconcile > History.\n"
+                        f"Transaction volume: {_gl_line}"
                     )
 
                 # Column O — auto adjustments
@@ -619,14 +720,18 @@ async def run_assessment(
                     )
             except Exception:
                 ws_bank[f"G{i}"].value = last_rec
-                ws_bank[f"J{i}"].value = "Review in QBO Reconcile > History by Account"
+                ws_bank[f"J{i}"].value = (
+                    f"Review in QBO Reconcile > History by Account.\n"
+                    f"Transaction volume: {_gl_summary_line()}"
+                )
                 ws_bank[f"O{i}"].value = "Review in QBO Reconcile > History by Account"
         else:
             ws_bank[f"G{i}"].value = "Never reconciled"
             unreconciled_accounts.append(name)
             ws_bank[f"J{i}"].value = (
                 "N/A — account has never been reconciled. "
-                "All transactions are uncleared. Establish opening balance and begin reconciling."
+                "All transactions are uncleared. Establish opening balance and begin reconciling.\n"
+                f"Transaction volume: {_gl_summary_line()}"
             )
             ws_bank[f"O{i}"].value = (
                 "N/A — no reconciliation performed yet. "
@@ -659,36 +764,42 @@ async def run_assessment(
             )
 
         # ── Column W — old / uncategorized transactions in bank feeds window ──
+        _gl_line_w = _gl_summary_line()
         if feed_connected:
             if _pending_for_acct > 0:
                 ws_bank[f"W{i}"].value = (
                     f"{_pending_for_acct} transaction(s) pending in 'For Review' tab for this account. "
-                    "Categorize or match all items — unreviewed transactions are excluded from P&L and Balance Sheet."
+                    "Categorize or match all items — unreviewed transactions are excluded from P&L and Balance Sheet.\n"
+                    f"Total activity this period: {_gl_line_w}"
                 )
             elif _total_uncat_purchases > 0:
                 ws_bank[f"W{i}"].value = (
                     f"{_total_uncat_purchases} uncategorized purchase(s) found across all accounts (no expense account assigned). "
-                    "Categorize in QBO Banking > For Review tab."
+                    "Categorize in QBO Banking > For Review tab.\n"
+                    f"Total activity this period: {_gl_line_w}"
                 )
             else:
                 ws_bank[f"W{i}"].value = (
                     "No pending transactions detected for this account. "
-                    "Confirm For Review tab is clear in QBO Banking."
+                    "Confirm For Review tab is clear in QBO Banking.\n"
+                    f"Total activity this period: {_gl_line_w}"
                 )
         elif bank_num:
             ws_bank[f"W{i}"].value = (
                 "Connect bank feed to enable automatic transaction import. "
-                "Currently requires manual entry or CSV upload."
+                "Currently requires manual entry or CSV upload.\n"
+                f"Total activity this period: {_gl_line_w}"
             )
         else:
             ws_bank[f"W{i}"].value = (
                 "No bank feed — set up connection in QBO Banking > Connect Account "
-                "to enable automatic transaction import and review."
+                "to enable automatic transaction import and review.\n"
+                f"Total activity this period: {_gl_line_w}"
             )
 
     if bank_accounts:
         acct_lines = []
-        for a in bank_accounts:
+        for _ai, a in enumerate(bank_accounts):
             name = a.get("Name", "")
             lrd = a.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
             _bal_str = ""
@@ -706,7 +817,22 @@ async def run_assessment(
                     status = f"last reconciled: {lrd}"
             else:
                 status = "NEVER RECONCILED"
-            acct_lines.append(f"• {name}{_bal_str}: {status}")
+            # Add GL transaction volume for accounts we fetched
+            _ai_gl = gl_stats_by_idx[_ai] if _ai < len(gl_stats_by_idx) else {}
+            _ai_count = _ai_gl.get("txn_count", 0)
+            _ai_net = _ai_gl.get("net_amount", 0.0)
+            _ai_first = _ai_gl.get("first_date") or ""
+            _ai_last = _ai_gl.get("last_date") or ""
+            _txn_str = ""
+            if _ai_count:
+                try:
+                    d1 = _date_cls.fromisoformat(_ai_first[:10]).strftime("%m/%d/%Y") if _ai_first else ""
+                    d2 = _date_cls.fromisoformat(_ai_last[:10]).strftime("%m/%d/%Y") if _ai_last else ""
+                except Exception:
+                    d1, d2 = _ai_first, _ai_last
+                _net_str = f"${_ai_net:,.2f}" if _ai_net >= 0 else f"(${abs(_ai_net):,.2f})"
+                _txn_str = f" | {_ai_count} txns ({d1}–{d2}, net {_net_str})"
+            acct_lines.append(f"• {name}{_bal_str}: {status}{_txn_str}")
 
         banking_summary = (
             f"Found {len(bank_accounts)} bank/credit card account(s):\n"
