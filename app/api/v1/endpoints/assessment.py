@@ -328,8 +328,20 @@ async def run_assessment(
     ap_data = _extract_aging_buckets(ap_aging_report)
 
     active_accounts = [a for a in coa_list if a.get("Active", True)]
-    bank_accounts = [a for a in active_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
+    _all_bank_accounts = [a for a in active_accounts if a.get("AccountType") in ("Bank", "Credit Card")]
     total_account_count = len(active_accounts)
+
+    # Sort bank accounts: real checking/savings and credit cards first,
+    # clearing/payroll/placeholder accounts last.
+    _CLEARING_KEYWORDS = ("clearing", "adp", "payroll clearing", "ask my account", "ask my accountant")
+    def _bank_sort_key(a: dict) -> int:
+        name_lower = a.get("Name", "").lower()
+        if any(kw in name_lower for kw in _CLEARING_KEYWORDS):
+            return 2  # push to end
+        if a.get("AccountType") == "Credit Card":
+            return 1  # credit cards after checking/savings
+        return 0  # checking/savings first
+    bank_accounts = sorted(_all_bank_accounts, key=_bank_sort_key)
 
     # ── Secondary banking fetches: individual account GETs + recon reports + BankTransaction ──
     # The bulk COA query (SELECT * FROM Account) does NOT return:
@@ -378,7 +390,7 @@ async def run_assessment(
             logger.warning("QBO recon report failed: id=%s name=%s error=%s", acct_id, acct_name, exc)
             return {}
 
-    _n_bank = min(6, len(bank_accounts))
+    _n_bank = min(8, len(bank_accounts))  # fetch up to 8 accounts for enrichment
     # Build all tasks: account GETs, recon reports, then BankTransaction query
     _bank_tasks = (
         [_get_full_account(a) for a in bank_accounts[:_n_bank]]
@@ -531,12 +543,24 @@ async def run_assessment(
     unreconciled_accounts: list[str] = []
     old_rec_accounts: list[str] = []
 
+    # Build a lookup: account Name → current balance from Balance Sheet rows
+    bs_bank_balances: dict[str, float] = {}
+    for _bsr in bs_rows:
+        _bsn = _bsr.get("name", "").strip()
+        if _bsn and abs(_bsr.get("amount", 0)) > 0.001:
+            bs_bank_balances[_bsn] = _bsr.get("amount", 0.0)
+
     from datetime import date as _date_cls
-    for i, acct in enumerate(bank_accounts[:5], start=4):
+    # Fill up to 8 account rows (template rows 4-11)
+    for i, acct in enumerate(bank_accounts[:8], start=4):
         _acct_idx = i - 4  # 0-based index into recon_info_by_idx
         name = acct.get("Name", "")
         acct_id = acct.get("Id", "")
         ws_bank[f"A{i}"].value = name
+        # ── Balance from Balance Sheet ────────────────────────────────────────
+        _bal = bs_bank_balances.get(name, None)
+        if _bal is not None:
+            ws_bank[f"B{i}"].value = f"${_bal:,.2f}" if _bal >= 0 else f"(${abs(_bal):,.2f})"
 
         # ── Reconciliation date: prefer individual GET field, then recon report header ──
         _recon_info = recon_info_by_idx[_acct_idx] if _acct_idx < len(recon_info_by_idx) else {}
@@ -663,9 +687,13 @@ async def run_assessment(
 
     if bank_accounts:
         acct_lines = []
-        for a in bank_accounts[:5]:
+        for a in bank_accounts:
             name = a.get("Name", "")
             lrd = a.get("LastReconcileDate", "") or acct_rec_dates.get(name, "")
+            _bal_str = ""
+            _bal_v = bs_bank_balances.get(name)
+            if _bal_v is not None:
+                _bal_str = f" | Balance: ${_bal_v:,.2f}" if _bal_v >= 0 else f" | Balance: (${abs(_bal_v):,.2f})"
             status = ""
             if lrd:
                 try:
@@ -677,7 +705,7 @@ async def run_assessment(
                     status = f"last reconciled: {lrd}"
             else:
                 status = "NEVER RECONCILED"
-            acct_lines.append(f"• {name}: {status}")
+            acct_lines.append(f"• {name}{_bal_str}: {status}")
 
         banking_summary = (
             f"Found {len(bank_accounts)} bank/credit card account(s):\n"
@@ -706,7 +734,7 @@ async def run_assessment(
     if _total_btxn > 0:
         _per_acct_lines = [
             f"  • {a.get('Name','')}: {btxn_count_by_acct_id.get(a.get('Id',''), 0)} pending"
-            for a in bank_accounts[:5] if btxn_count_by_acct_id.get(a.get("Id", ""), 0) > 0
+            for a in bank_accounts if btxn_count_by_acct_id.get(a.get("Id", ""), 0) > 0
         ]
         _for_review_msg = (
             f"For Review: {_total_btxn} total transaction(s) pending across connected accounts:\n"
@@ -721,18 +749,6 @@ async def run_assessment(
         banking_summary += f"\n\nFor Review: {_uncat_count} purchase(s) with no account assigned — categorize in QBO Banking > For Review."
     else:
         banking_summary += "\n\nFor Review: No pending or uncategorized transactions detected — confirm in QBO Banking tab."
-
-    # Append debug info so it's visible in the Excel file itself
-    _debug_lines = ["[API DEBUG — remove before client delivery]"]
-    for _ba in bank_accounts[:6]:
-        _debug_lines.append(
-            f"  {_ba.get('Name','?')}: LastReconcileDate={_ba.get('LastReconcileDate','—')} "
-            f"FeedAccountType={_ba.get('FeedAccountType','—')} "
-            f"ConnectionStatus={_ba.get('ConnectionStatus','—')}"
-        )
-    _debug_lines.append(f"  BankTransaction query returned: {len(bank_transactions_for_review) if isinstance(bank_transactions_for_review, list) else 0} records")
-    _debug_lines.append(f"  btxn_count_by_acct_id: {btxn_count_by_acct_id}")
-    banking_summary += "\n\n" + "\n".join(_debug_lines)
 
     ws_bank["A11"].value = banking_summary
 
