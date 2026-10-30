@@ -551,8 +551,9 @@ async def run_assessment(
             bs_bank_balances[_bsn] = _bsr.get("amount", 0.0)
 
     from datetime import date as _date_cls
-    # Fill up to 8 account rows (template rows 4-11)
-    for i, acct in enumerate(bank_accounts[:8], start=4):
+    # Template has 5 account rows (rows 4-8). Sort ensures the most important
+    # accounts (real bank/checking first) fill those slots.
+    for i, acct in enumerate(bank_accounts[:5], start=4):
         _acct_idx = i - 4  # 0-based index into recon_info_by_idx
         name = acct.get("Name", "")
         acct_id = acct.get("Id", "")
