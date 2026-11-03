@@ -55,8 +55,9 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             {
                 "pool_classes": ["Fundraising", "Community Asset"],
                 "waterfall": [
-                    {"name": "B3 Living Cities 2026", "annual_budget": 12500.00},
-                    {"name": "First Citizen Bank",     "annual_budget": 20000.00},
+                    {"name": "B3 Living Cities 2026",      "annual_budget": 12500.00},
+                    {"name": "First Citizen Bank",          "annual_budget": 20000.00},
+                    {"name": "B3 National Main Street",     "annual_budget": 12500.00},
                 ],
             },
         ],
