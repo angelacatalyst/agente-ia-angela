@@ -50,6 +50,14 @@ interface NeedsSelectionItem {
   grant_options: GrantOption[]
 }
 
+interface ResolvedGrant {
+  grant_name: string
+  qbo_project: string
+  customer_id: string
+  customer_display: string
+  total_available: number
+}
+
 interface TagPreviewResult {
   summary: {
     changes_needed: number
@@ -67,6 +75,7 @@ interface TagPreviewResult {
   needs_selection: NeedsSelectionItem[]
   pending_no_rule: { purchase_id: string; txn_date: string; vendor: string; account_name: string; class_name: string; amount: number; current_grant: string }[]
   multi_grant_lines: { program: string; account_num: string; description: string; grants: { name: string; amount: number }[] }[]
+  grants_resolved: ResolvedGrant[]
 }
 
 const ALLAPATTAH_REALM = '9341454010854556'
@@ -99,6 +108,8 @@ export function GrantsPage() {
   const [showScan, setShowScan] = useState(false)
   // Multi-grant selection: key = `${purchase_id}:${line_id}`, value = chosen grant info
   const [multiSelections, setMultiSelections] = useState<Record<string, { customer_id: string; customer_display: string; purchase_id: string; sync_token: string; line_id: string }>>({})
+  // Pending manual assignments: key = `${purchase_id}`, value = chosen grant info
+  const [pendingSelections, setPendingSelections] = useState<Record<string, { customer_id: string; customer_display: string; purchase_id: string }>>({})
 
 
   const isAllapattah = selectedRealmId === ALLAPATTAH_REALM
@@ -183,12 +194,21 @@ export function GrantsPage() {
     // Also include confirmed multi-grant selections
     const multiApply = Object.values(multiSelections).map(sel => ({
       purchase_id: sel.purchase_id,
-      sync_token: '',  // will be refreshed server-side
+      sync_token: '',
       line_id: sel.line_id,
       expected_customer_id: sel.customer_id,
       expected_grant: sel.customer_display,
     }))
-    const allChanges = [...toApply, ...multiApply]
+    // Also include pending transactions with manually selected grants
+    const pendingApply = Object.values(pendingSelections).map(sel => ({
+      purchase_id: sel.purchase_id,
+      sync_token: '',
+      line_id: '',  // apply to ALL lines of this purchase
+      expected_customer_id: sel.customer_id,
+      expected_grant: sel.customer_display,
+      apply_to_all_lines: true,
+    }))
+    const allChanges = [...toApply, ...multiApply, ...pendingApply]
     if (allChanges.length === 0) return
     setTagApplyLoading(true)
     try {
@@ -627,15 +647,16 @@ export function GrantsPage() {
                     <p className="text-xs font-semibold text-surface-700">
                       {selectedChanges.size} de {tagPreview.changes.length} automáticos
                       {Object.keys(multiSelections).length > 0 && ` + ${Object.keys(multiSelections).length} multi-grant`}
+                      {Object.keys(pendingSelections).length > 0 && ` + ${Object.keys(pendingSelections).length} pending`}
                     </p>
                     <button
                       onClick={applyTagChanges}
-                      disabled={(selectedChanges.size === 0 && Object.keys(multiSelections).length === 0) || tagApplyLoading}
+                      disabled={(selectedChanges.size === 0 && Object.keys(multiSelections).length === 0 && Object.keys(pendingSelections).length === 0) || tagApplyLoading}
                       className="btn-primary text-[12px]"
                     >
                       {tagApplyLoading
                         ? <><Loader2 size={12} className="animate-spin" /> Aplicando…</>
-                        : <><CheckCircle2 size={12} /> Aplicar en QBO ({selectedChanges.size + Object.keys(multiSelections).length})</>
+                        : <><CheckCircle2 size={12} /> Aplicar en QBO ({selectedChanges.size + Object.keys(multiSelections).length + Object.keys(pendingSelections).length})</>
                       }
                     </button>
                   </div>
@@ -717,28 +738,60 @@ export function GrantsPage() {
               {/* Pending with no rule */}
               {(tagPreview.pending_no_rule?.length ?? 0) > 0 && (
                 <div className="mt-3">
-                  <p className="text-xs font-semibold text-orange-700 mb-2">
-                    ⚠️ Pending Allocations sin regla automática ({tagPreview.pending_no_rule.length}) — revisar manualmente:
-                  </p>
-                  <div className="max-h-48 overflow-y-auto rounded border border-orange-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-orange-700">
+                      ⚠️ Pending Allocations sin regla automática ({tagPreview.pending_no_rule.length}) — asignar grant manualmente:
+                    </p>
+                    <span className="text-[10px] text-orange-500">{Object.keys(pendingSelections).length} asignados</span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto rounded border border-orange-200">
                     <table className="w-full text-[11px]">
                       <thead className="bg-orange-50 sticky top-0">
                         <tr>
-                          {['Fecha','Proveedor','Cuenta','Clase','Monto'].map(h => (
+                          {['Fecha','Proveedor','Cuenta','Clase','Monto','→ Asignar grant'].map(h => (
                             <th key={h} className="px-2 py-1 text-left font-medium text-orange-800">{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {tagPreview.pending_no_rule.map((row, i) => (
-                          <tr key={i} className="border-t border-orange-100">
-                            <td className="px-2 py-1">{row.txn_date}</td>
-                            <td className="px-2 py-1">{row.vendor}</td>
-                            <td className="px-2 py-1">{row.account_name}</td>
-                            <td className="px-2 py-1">{row.class_name}</td>
-                            <td className="px-2 py-1 text-right">${row.amount.toFixed(2)}</td>
-                          </tr>
-                        ))}
+                        {tagPreview.pending_no_rule.map((row, i) => {
+                          const sel = pendingSelections[row.purchase_id]
+                          return (
+                            <tr key={i} className={`border-t border-orange-100 ${sel ? 'bg-orange-50/40' : ''}`}>
+                              <td className="px-2 py-1">{row.txn_date}</td>
+                              <td className="px-2 py-1">{row.vendor}</td>
+                              <td className="px-2 py-1 max-w-[120px] truncate">{row.account_name}</td>
+                              <td className="px-2 py-1 text-surface-500">{row.class_name}</td>
+                              <td className="px-2 py-1 text-right">${row.amount.toFixed(2)}</td>
+                              <td className="px-2 py-1">
+                                <select
+                                  className="text-[11px] rounded border border-orange-300 bg-white px-1 py-0.5 w-full max-w-[200px]"
+                                  value={sel?.customer_id ?? ''}
+                                  onChange={e => {
+                                    const grant = (tagPreview.grants_resolved ?? []).find(g => g.customer_id === e.target.value)
+                                    if (grant) {
+                                      setPendingSelections(prev => ({
+                                        ...prev,
+                                        [row.purchase_id]: {
+                                          customer_id: grant.customer_id,
+                                          customer_display: grant.customer_display,
+                                          purchase_id: row.purchase_id,
+                                        }
+                                      }))
+                                    } else {
+                                      setPendingSelections(prev => { const n = {...prev}; delete n[row.purchase_id]; return n })
+                                    }
+                                  }}
+                                >
+                                  <option value="">— seleccionar grant —</option>
+                                  {(tagPreview.grants_resolved ?? []).map((g, j) => (
+                                    <option key={j} value={g.customer_id}>{g.customer_display}</option>
+                                  ))}
+                                </select>
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

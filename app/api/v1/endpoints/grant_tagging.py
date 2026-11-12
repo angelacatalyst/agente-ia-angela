@@ -190,16 +190,21 @@ def _build_rule_index(
     programs_map: dict[str, str],
     grants_map: dict[str, dict],
     customer_map: dict[str, dict],
-) -> dict[tuple[str, str], dict]:
+) -> tuple[dict[tuple[str, str], dict], set[tuple[str, str]]]:
     """Build a lookup index: (account_num, program_key) → rule info.
 
-    program_key is the UPPER-CASED short program name as in the BUDGET sheet.
+    Also returns `ambiguous_keys` — keys where the same (account, program) has
+    multiple different single-grant assignments. Those should be routed to
+    needs_selection (multi-grant UI) instead of auto-assigned.
+
+    Returns: (index, ambiguous_keys)
     """
     index: dict[tuple[str, str], dict] = {}
+    ambiguous_keys: set[tuple[str, str]] = set()
 
     for rule in tagging_rules:
         if not rule["is_simple"] or not rule["grants"]:
-            continue  # skip multi-grant lines (require manual review)
+            continue  # multi-grant lines handled separately
 
         account_num = rule["account_num"]
         program_key = rule["program"].upper()
@@ -211,32 +216,82 @@ def _build_rule_index(
         customer_id, customer_display = _resolve_customer(qbo_project, customer_map)
 
         key = (account_num, program_key)
-        # If multiple rules share the same key, keep the one with the larger assignment
         existing = index.get(key)
-        if existing is None or rule["total_assigned"] > existing.get("total_assigned", 0):
+        if existing is None:
             index[key] = {
                 "grant_name": grant_name,
                 "customer_id": customer_id,
                 "customer_display": customer_display,
-                "account_name": rule["account_name"],    # budget account name (for fuzzy match)
+                "account_name": rule["account_name"],
                 "description": rule["description"],
                 "total_assigned": rule["total_assigned"],
             }
+        elif existing["grant_name"] != grant_name:
+            # Same (account, program) → different grant: ambiguous, route to manual selection
+            ambiguous_keys.add(key)
+        # else: same grant repeated (accumulate amounts) — keep as-is
 
-    return index
+    # Remove ambiguous entries from the auto-assign index
+    for k in ambiguous_keys:
+        index.pop(k, None)
+
+    return index, ambiguous_keys
+
+
+def _norm_customer_name(s: str) -> str:
+    """Normalize a customer name for fuzzy comparison."""
+    import re
+    # Normalize dashes (en-dash, em-dash → hyphen)
+    s = s.replace('–', '-').replace('—', '-').replace('‒', '-')
+    # Lower, collapse whitespace
+    s = re.sub(r'\s+', ' ', s.lower()).strip()
+    return s
 
 
 def _resolve_customer(qbo_project: str, customer_map: dict) -> tuple[str | None, str | None]:
-    """Resolve a QBO project name to (customer_id, customer_display_name)."""
+    """Resolve a QBO project name from the SETUP sheet to (customer_id, display_name).
+
+    Strategy (most to least strict):
+    1. Exact match
+    2. Normalized match (ignore case/dash variants)
+    3. Exact match after stripping dollar amounts in parentheses
+    4. Normalized prefix (≥15 chars) — conservative, avoids false positives
+    """
+    import re
+
     if not qbo_project:
         return None, None
+
+    # 1. Exact match
     if qbo_project in customer_map:
         c = customer_map[qbo_project]
         return c["Id"], c.get("FullyQualifiedName") or c.get("DisplayName")
-    prefix = qbo_project[:30].lower()
+
+    proj_norm = _norm_customer_name(qbo_project)
+
+    # 2. Normalized full match
     for cname, cdata in customer_map.items():
-        if prefix and prefix in cname.lower():
+        if _norm_customer_name(cname) == proj_norm:
             return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+
+    # 3. Strip trailing parenthetical (dollar amounts, years) and try again
+    base = re.sub(r'\s*[\(\[].*[\)\]]\s*$', '', qbo_project).strip()
+    if base and base != qbo_project:
+        base_norm = _norm_customer_name(base)
+        for cname, cdata in customer_map.items():
+            cname_norm = _norm_customer_name(cname)
+            if cname_norm == base_norm or cname_norm.startswith(base_norm + ' ') or cname_norm.startswith(base_norm + ':'):
+                return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+
+    # 4. Conservative prefix match — only if prefix is at least 15 chars and UNIQUE
+    prefix = proj_norm[:20] if len(proj_norm) >= 15 else None
+    if prefix:
+        matches = [(cname, cdata) for cname, cdata in customer_map.items()
+                   if _norm_customer_name(cname).startswith(prefix)]
+        if len(matches) == 1:  # only match if unambiguous
+            cdata = matches[0][1]
+            return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+
     return None, None
 
 
@@ -244,6 +299,7 @@ def _build_multi_rule_index(
     tagging_rules: list[dict],
     grants_map: dict[str, dict],
     customer_map: dict[str, dict],
+    ambiguous_keys: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], dict]:
     """Build lookup index for multi-grant lines.
 
@@ -255,11 +311,14 @@ def _build_multi_rule_index(
     index: dict[tuple[str, str], dict] = {}
 
     for rule in tagging_rules:
-        if rule["is_simple"] or not rule["grants"]:
-            continue  # handled by simple index
-
+        if not rule["grants"]:
+            continue
+        # Include both explicitly multi-grant lines AND ambiguous simple-grant keys
         account_num = rule["account_num"]
         program_key = rule["program"].upper()
+        key = (account_num, program_key)
+        if rule["is_simple"] and (ambiguous_keys is None or key not in ambiguous_keys):
+            continue  # truly simple, single-grant → handled by simple index
 
         grant_options = []
         for grant_name, amount in rule["grants"]:
@@ -460,8 +519,13 @@ async def preview_grant_tagging(
         raise HTTPException(status_code=502, detail=f"QBO expense fetch failed: {exc}") from exc
 
     # --- Build rule indexes ---
-    rule_index = _build_rule_index(tagging_rules, programs_map, grants_map, customer_map)
-    multi_rule_index = _build_multi_rule_index(tagging_rules, grants_map, customer_map)
+    rule_index, ambiguous_keys = _build_rule_index(tagging_rules, programs_map, grants_map, customer_map)
+    multi_rule_index = _build_multi_rule_index(tagging_rules, grants_map, customer_map, ambiguous_keys)
+
+    logger.info(
+        "Rule index: simple=%d ambiguous=%d multi=%d",
+        len(rule_index), len(ambiguous_keys), len(multi_rule_index),
+    )
 
     # --- Identify multi-grant budget lines (for the summary section) ---
     multi_grant_lines = [
@@ -609,10 +673,13 @@ async def preview_grant_tagging(
             {
                 "grant_name": gname,
                 "qbo_project": ginfo["qbo_project"],
-                "customer_id": (customer_map.get(ginfo["qbo_project"]) or {}).get("Id"),
+                "customer_id": cid,
+                "customer_display": cdisplay or ginfo["qbo_project"],
                 "total_available": ginfo["total_available"],
             }
             for gname, ginfo in grants_map.items()
+            for cid, cdisplay in [_resolve_customer(ginfo["qbo_project"], customer_map)]
+            if cid  # only include grants we could resolve to a QBO customer
         ],
     }
 
