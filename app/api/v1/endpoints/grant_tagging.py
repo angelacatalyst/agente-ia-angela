@@ -14,8 +14,10 @@ from typing import Any
 import openpyxl
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_db, get_qbo_client_for_realm
 from app.core.security import verify_api_key
-from app.integrations.quickbooks.client import QBOClient
 
 router = APIRouter(prefix="/grants", tags=["Grant Tagging"])
 logger = logging.getLogger(__name__)
@@ -258,6 +260,7 @@ async def preview_grant_tagging(
     period_start: str = Form("2026-01-01"),
     period_end: str = Form("2026-12-31"),
     _: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
     Upload the Budget Excel → parse grant rules → query QBO transactions →
@@ -292,7 +295,7 @@ async def preview_grant_tagging(
     )
 
     # --- QBO: get customers + expenses ---
-    client = QBOClient(realm_id=realm_id)
+    client = await get_qbo_client_for_realm(realm_id, db)
 
     try:
         customers = await client.get_customers()
@@ -418,6 +421,7 @@ async def apply_grant_tagging(
     changes: list[dict],
     dry_run: bool = False,
     _: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
     Apply the grant changes returned by /tag/preview.
@@ -425,7 +429,7 @@ async def apply_grant_tagging(
 
     Set dry_run=true to validate without writing to QBO.
     """
-    client = QBOClient(realm_id=realm_id)
+    client = await get_qbo_client_for_realm(realm_id, db)
 
     # Group changes by purchase_id so we update each Purchase once
     purchases_to_update: dict[str, list[dict]] = {}
