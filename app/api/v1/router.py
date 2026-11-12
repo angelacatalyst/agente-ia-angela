@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     controller,
     eod,
     expenses,
+    grant_tagging,
     grants,
     integrations,
     payments,
@@ -26,6 +27,7 @@ api_router.include_router(chat.router)
 api_router.include_router(audit.router)
 api_router.include_router(transactions.router)
 api_router.include_router(grants.router)
+api_router.include_router(grant_tagging.router)
 api_router.include_router(payments.router)
 api_router.include_router(vendors.router)
 api_router.include_router(sops.router)

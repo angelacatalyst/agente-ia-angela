@@ -1,0 +1,503 @@
+"""Grant Tagging endpoint — upload Budget Excel, preview and apply grant assignments to QBO.
+
+Workflow:
+  POST /grants/tag/preview  → parse Excel + query QBO → return list of changes needed
+  POST /grants/tag/apply    → apply confirmed changes (update CustomerRef on QBO expenses)
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+from typing import Any
+
+import openpyxl
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+
+from app.core.security import verify_api_key
+from app.integrations.quickbooks.client import QBOClient
+
+router = APIRouter(prefix="/grants", tags=["Grant Tagging"])
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Excel parsing helpers
+# ---------------------------------------------------------------------------
+
+def _parse_setup_sheet(ws) -> tuple[dict[str, str], dict[str, dict]]:
+    """Parse the SETUP sheet.
+
+    Returns:
+        programs_map: {program_name_upper → qbo_class_full_name}
+        grants_map:   {grant_name → {"qbo_project": str, "funder": str, "total_available": float}}
+    """
+    programs_map: dict[str, str] = {}
+    grants_map: dict[str, dict] = {}
+
+    # Data starts at row 8 (rows 1-7 are title, notes, and headers)
+    _PROGRAM_SKIP = {"PROGRAM", "A · PROGRAMS (CLASS IN QBO)"}
+    _GRANT_SKIP   = {"GRANT (NAME USED IN THE ALLOCATIONS)", "B · GRANTS AVAILABLE FOR THE FISCAL YEAR (ONE ROW PER QBO PROJECT)"}
+
+    for row in ws.iter_rows(min_row=8, values_only=True):
+        if not row:
+            continue
+        # Programs are in cols A-B (indices 0-1)
+        prog_name = row[0]
+        prog_class = row[1]
+        if (
+            isinstance(prog_name, str) and prog_name.strip()
+            and isinstance(prog_class, str) and prog_class.strip()
+            and prog_name.strip().upper() not in _PROGRAM_SKIP
+        ):
+            programs_map[prog_name.strip().upper()] = prog_class.strip()
+
+        # Grants are in cols E-J (indices 4-9)
+        grant_name = row[4]
+        qbo_project = row[5]
+        funder = row[6]
+        total_avail = row[9]
+        if (
+            isinstance(grant_name, str) and grant_name.strip()
+            and grant_name.strip().upper() not in _GRANT_SKIP
+        ):
+            grants_map[grant_name.strip()] = {
+                "qbo_project": str(qbo_project).strip() if qbo_project else "",
+                "funder": str(funder).strip() if funder else "",
+                "total_available": float(total_avail) if isinstance(total_avail, (int, float)) else 0.0,
+            }
+
+    return programs_map, grants_map
+
+
+def _parse_budget_sheet(ws, grants_map: dict[str, dict]) -> list[dict]:
+    """Parse the BUDGET sheet and return a list of tagging rules.
+
+    Each rule: {
+        program, account_num, account_name, line_type, description,
+        annual_budget, total_assigned, status,
+        grants: [(grant_name, amount), ...],
+        is_simple: bool  (True = one grant covers 100%)
+    }
+    """
+    # Row 5 is the header row — find which columns hold grant data
+    header_row: list = []
+    grant_col_start: int | None = None
+    grant_col_names: list[str | None] = []
+
+    for row in ws.iter_rows(min_row=5, max_row=5, values_only=True):
+        header_row = list(row)
+        # Grant columns start after "Status" (col X = index 23)
+        for col_idx in range(24, len(header_row)):
+            val = header_row[col_idx]
+            if isinstance(val, str) and val.strip():
+                if grant_col_start is None:
+                    grant_col_start = col_idx
+                break
+
+        if grant_col_start is not None:
+            for col_idx in range(grant_col_start, len(header_row)):
+                val = header_row[col_idx]
+                if isinstance(val, str) and val.strip():
+                    grant_col_names.append(val.strip())
+                elif val is None:
+                    grant_col_names.append(None)
+                else:
+                    grant_col_names.append(str(val).strip() if val else None)
+
+    known_grants = set(grants_map.keys())
+    tagging_rules: list[dict] = []
+
+    for row in ws.iter_rows(min_row=6, values_only=True):
+        if not row:
+            continue
+
+        program = str(row[0]).strip() if row[0] else None
+        line_type = str(row[2]).strip() if row[2] else None
+        description = str(row[3]).strip() if row[3] else None
+        account_name = str(row[4]).strip() if row[4] else None
+        account_num = str(row[5]).strip() if row[5] else None
+        annual_budget = float(row[19]) if isinstance(row[19], (int, float)) else 0.0
+        total_assigned = float(row[21]) if isinstance(row[21], (int, float)) else 0.0
+        status = str(row[23]).strip() if row[23] else None
+
+        # Skip group/subtotal rows (no program or no account number)
+        if not program or not account_num or annual_budget <= 0:
+            continue
+
+        # Read which grants cover this line
+        grants_on_line: list[tuple[str, float]] = []
+        if grant_col_start is not None:
+            for col_offset, grant_name in enumerate(grant_col_names):
+                if not grant_name:
+                    continue
+                col_idx = grant_col_start + col_offset
+                if col_idx < len(row):
+                    val = row[col_idx]
+                    if val and isinstance(val, (int, float)) and float(val) > 0.001:
+                        grants_on_line.append((grant_name, float(val)))
+
+        is_simple = len(grants_on_line) == 1
+
+        tagging_rules.append({
+            "program": program,
+            "account_num": account_num,
+            "account_name": account_name,
+            "line_type": line_type,
+            "description": description,
+            "annual_budget": annual_budget,
+            "total_assigned": total_assigned,
+            "status": status,
+            "grants": grants_on_line,
+            "is_simple": is_simple,
+        })
+
+    return tagging_rules
+
+
+def _build_rule_index(
+    tagging_rules: list[dict],
+    programs_map: dict[str, str],
+    grants_map: dict[str, dict],
+    customer_map: dict[str, dict],
+) -> dict[tuple[str, str], dict]:
+    """Build a lookup index: (account_num, program_key) → rule info.
+
+    program_key is the UPPER-CASED short program name as in the BUDGET sheet.
+    """
+    index: dict[tuple[str, str], dict] = {}
+
+    for rule in tagging_rules:
+        if not rule["is_simple"] or not rule["grants"]:
+            continue  # skip multi-grant lines (require manual review)
+
+        account_num = rule["account_num"]
+        program_key = rule["program"].upper()
+        grant_name = rule["grants"][0][0]
+
+        # Resolve QBO project name → customer ID
+        grant_info = grants_map.get(grant_name, {})
+        qbo_project = grant_info.get("qbo_project", "")
+        customer_id: str | None = None
+        customer_display: str | None = None
+
+        # Try exact match first, then partial
+        if qbo_project and qbo_project in customer_map:
+            customer_id = customer_map[qbo_project]["Id"]
+            customer_display = customer_map[qbo_project].get("FullyQualifiedName") or customer_map[qbo_project].get("DisplayName")
+        else:
+            # Partial match on first 30 chars
+            prefix = qbo_project[:30].lower() if qbo_project else ""
+            for cname, cdata in customer_map.items():
+                if prefix and prefix in cname.lower():
+                    customer_id = cdata["Id"]
+                    customer_display = cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+                    break
+
+        key = (account_num, program_key)
+        # If multiple rules share the same key, keep the one with the larger assignment
+        existing = index.get(key)
+        if existing is None or rule["total_assigned"] > existing.get("total_assigned", 0):
+            index[key] = {
+                "grant_name": grant_name,
+                "customer_id": customer_id,
+                "customer_display": customer_display,
+                "account_name": rule["account_name"],
+                "description": rule["description"],
+                "total_assigned": rule["total_assigned"],
+            }
+
+    return index
+
+
+def _extract_line_detail(line: dict) -> dict | None:
+    """Extract account/class/customer info from a QBO Purchase Line."""
+    detail = line.get("AccountBasedExpenseLineDetail")
+    if not detail:
+        return None
+
+    acct_ref = detail.get("AccountRef", {})
+    class_ref = detail.get("ClassRef", {})
+    customer_ref = detail.get("CustomerRef", {})
+
+    return {
+        "account_id": acct_ref.get("value", ""),
+        "account_name": acct_ref.get("name", ""),
+        "class_id": class_ref.get("value", ""),
+        "class_name": class_ref.get("name", ""),
+        "customer_id": customer_ref.get("value", ""),
+        "customer_name": customer_ref.get("name", ""),
+        "amount": float(line.get("Amount", 0)),
+    }
+
+
+def _match_account_num(account_name: str, account_num: str) -> bool:
+    """True if the QBO account name starts with the account number."""
+    if not account_name or not account_num:
+        return False
+    return account_name.startswith(account_num + " ") or account_name == account_num
+
+
+def _match_program(class_name: str, program_key: str) -> bool:
+    """True if the QBO class name contains the program key."""
+    if not class_name or not program_key:
+        return False
+    # QBO class names are like "Programs:Small Business Growth:SBRC"
+    # program_key is like "SBRC"
+    return program_key in class_name.upper()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/tag/preview", summary="Preview grant tagging changes from Budget Excel")
+async def preview_grant_tagging(
+    file: UploadFile = File(..., description="Budget Excel file (ACDC format)"),
+    realm_id: str = Form(...),
+    period_start: str = Form("2026-01-01"),
+    period_end: str = Form("2026-12-31"),
+    _: str = Depends(verify_api_key),
+) -> dict:
+    """
+    Upload the Budget Excel → parse grant rules → query QBO transactions →
+    return a preview of which expense lines need their grant (CustomerRef) updated.
+
+    Returns:
+      - changes:  list of transactions/lines that need a grant update
+      - already_correct: count of lines already tagged correctly
+      - no_rule:  count of lines with no matching budget rule
+      - multi_grant: list of budget lines with multiple grants (manual review needed)
+    """
+    content = await file.read()
+
+    # --- Parse Excel ---
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot open Excel file: {exc}") from exc
+
+    if "SETUP" not in wb.sheetnames or "BUDGET" not in wb.sheetnames:
+        raise HTTPException(
+            status_code=400,
+            detail="Excel must contain SETUP and BUDGET sheets."
+        )
+
+    programs_map, grants_map = _parse_setup_sheet(wb["SETUP"])
+    tagging_rules = _parse_budget_sheet(wb["BUDGET"], grants_map)
+
+    logger.info(
+        "Parsed Excel: programs=%d grants=%d rules=%d",
+        len(programs_map), len(grants_map), len(tagging_rules)
+    )
+
+    # --- QBO: get customers + expenses ---
+    client = QBOClient(realm_id=realm_id)
+
+    try:
+        customers = await client.get_customers()
+        customer_map: dict[str, dict] = {}
+        for c in customers:
+            name = c.get("FullyQualifiedName") or c.get("DisplayName", "")
+            if name:
+                customer_map[name] = c
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"QBO customer fetch failed: {exc}") from exc
+
+    try:
+        purchases = await client.get_all_expenses(start_date=period_start, end_date=period_end)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"QBO expense fetch failed: {exc}") from exc
+
+    # --- Build rule index ---
+    rule_index = _build_rule_index(tagging_rules, programs_map, grants_map, customer_map)
+
+    # --- Identify multi-grant rules (manual review) ---
+    multi_grant_lines = [
+        {
+            "program": r["program"],
+            "account_num": r["account_num"],
+            "description": r["description"],
+            "grants": [{"name": g[0], "amount": g[1]} for g in r["grants"]],
+            "annual_budget": r["annual_budget"],
+        }
+        for r in tagging_rules
+        if not r["is_simple"] and r["grants"]
+    ]
+
+    # --- Match QBO transactions to rules ---
+    changes: list[dict] = []
+    already_correct: int = 0
+    no_rule: int = 0
+
+    for purchase in purchases:
+        txn_id = purchase.get("Id", "")
+        txn_date = purchase.get("TxnDate", "")
+        vendor = (purchase.get("EntityRef") or {}).get("name", "")
+        sync_token = purchase.get("SyncToken", "")
+
+        for line in purchase.get("Line", []):
+            detail = _extract_line_detail(line)
+            if not detail:
+                continue
+            if detail["amount"] <= 0:
+                continue
+
+            account_name = detail["account_name"]
+            class_name = detail["class_name"]
+            current_customer_id = detail["customer_id"]
+
+            # Find matching rule
+            matched_rule = None
+            for (acct_num, prog_key), rule_info in rule_index.items():
+                if _match_account_num(account_name, acct_num) and _match_program(class_name, prog_key):
+                    matched_rule = rule_info
+                    break
+
+            if not matched_rule:
+                no_rule += 1
+                continue
+
+            expected_customer_id = matched_rule.get("customer_id")
+            if not expected_customer_id:
+                # Grant found in rules but couldn't resolve to QBO customer
+                no_rule += 1
+                continue
+
+            if current_customer_id == expected_customer_id:
+                already_correct += 1
+                continue
+
+            # Needs update
+            changes.append({
+                "purchase_id": txn_id,
+                "sync_token": sync_token,
+                "line_id": line.get("Id", ""),
+                "txn_date": txn_date,
+                "vendor": vendor,
+                "account_name": account_name,
+                "class_name": class_name,
+                "amount": detail["amount"],
+                "current_grant": detail["customer_name"] or "(none)",
+                "expected_grant": matched_rule["customer_display"] or matched_rule["grant_name"],
+                "expected_customer_id": expected_customer_id,
+                "grant_name": matched_rule["grant_name"],
+            })
+
+    logger.info(
+        "Preview: changes=%d already_correct=%d no_rule=%d multi_grant_lines=%d",
+        len(changes), already_correct, no_rule, len(multi_grant_lines)
+    )
+
+    return {
+        "summary": {
+            "changes_needed": len(changes),
+            "already_correct": already_correct,
+            "no_rule_found": no_rule,
+            "multi_grant_lines": len(multi_grant_lines),
+            "grants_in_excel": len(grants_map),
+            "rules_parsed": len(tagging_rules),
+        },
+        "changes": sorted(changes, key=lambda x: (x["txn_date"], x["vendor"])),
+        "multi_grant_lines": multi_grant_lines,
+        "grants_resolved": [
+            {
+                "grant_name": gname,
+                "qbo_project": ginfo["qbo_project"],
+                "customer_id": (customer_map.get(ginfo["qbo_project"]) or {}).get("Id"),
+                "total_available": ginfo["total_available"],
+            }
+            for gname, ginfo in grants_map.items()
+        ],
+    }
+
+
+@router.post("/tag/apply", summary="Apply grant tagging changes to QBO")
+async def apply_grant_tagging(
+    realm_id: str,
+    changes: list[dict],
+    dry_run: bool = False,
+    _: str = Depends(verify_api_key),
+) -> dict:
+    """
+    Apply the grant changes returned by /tag/preview.
+    For each Purchase, updates the CustomerRef on matching lines.
+
+    Set dry_run=true to validate without writing to QBO.
+    """
+    client = QBOClient(realm_id=realm_id)
+
+    # Group changes by purchase_id so we update each Purchase once
+    purchases_to_update: dict[str, list[dict]] = {}
+    for change in changes:
+        pid = change["purchase_id"]
+        purchases_to_update.setdefault(pid, []).append(change)
+
+    results: list[dict] = []
+    errors: list[dict] = []
+
+    for purchase_id, line_changes in purchases_to_update.items():
+        try:
+            # Fetch the full current Purchase (QBO returns {"Purchase": {...}})
+            raw = await client.get_purchase(purchase_id)
+            purchase = raw.get("Purchase") or raw  # unwrap if nested
+            sync_token = purchase.get("SyncToken", "0")
+
+            # Build a map: line_id → expected_customer_id
+            line_update_map: dict[str, dict] = {
+                lc["line_id"]: {
+                    "customer_id": lc["expected_customer_id"],
+                    "grant_name": lc["expected_grant"],
+                }
+                for lc in line_changes
+            }
+
+            # Update matching lines
+            updated_count = 0
+            for line in purchase.get("Line", []):
+                line_id = line.get("Id", "")
+                update = line_update_map.get(line_id)
+                if not update:
+                    continue
+                detail = line.get("AccountBasedExpenseLineDetail")
+                if detail:
+                    detail["CustomerRef"] = {"value": update["customer_id"]}
+                    updated_count += 1
+
+            if updated_count == 0:
+                errors.append({
+                    "purchase_id": purchase_id,
+                    "error": "No matching lines found in Purchase to update",
+                })
+                continue
+
+            if dry_run:
+                results.append({
+                    "purchase_id": purchase_id,
+                    "txn_date": purchase.get("TxnDate"),
+                    "lines_updated": updated_count,
+                    "status": "dry_run",
+                })
+                continue
+
+            # POST the updated Purchase back to QBO (full record, not sparse)
+            updated = await client.update_purchase(purchase_id, sync_token, purchase, sparse=False)
+            results.append({
+                "purchase_id": purchase_id,
+                "txn_date": purchase.get("TxnDate"),
+                "lines_updated": updated_count,
+                "status": "updated",
+                "new_sync_token": (updated.get("Purchase") or {}).get("SyncToken"),
+            })
+
+        except Exception as exc:
+            logger.warning("Failed to update purchase %s: %s", purchase_id, exc)
+            errors.append({"purchase_id": purchase_id, "error": str(exc)})
+
+    return {
+        "applied": len(results),
+        "errors": len(errors),
+        "dry_run": dry_run,
+        "results": results,
+        "error_details": errors,
+    }

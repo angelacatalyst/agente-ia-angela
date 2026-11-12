@@ -137,6 +137,22 @@ export const api = {
   grants: {
     audit: (payload: unknown) =>
       apiClient.post('/grants/audit', payload).then(r => r.data),
+
+    tagPreview: (file: File, realmId: string, periodStart: string, periodEnd: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('realm_id', realmId)
+      fd.append('period_start', periodStart)
+      fd.append('period_end', periodEnd)
+      return apiClient.post('/grants/tag/preview', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      }).then(r => r.data)
+    },
+
+    tagApply: (realmId: string, changes: unknown[], dryRun?: boolean) =>
+      apiClient.post('/grants/tag/apply', changes, {
+        params: { realm_id: realmId, dry_run: dryRun ?? false },
+      }).then(r => r.data),
   },
 
   payments: {

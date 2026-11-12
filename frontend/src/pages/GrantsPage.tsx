@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useI18n } from '@/lib/i18n'
@@ -9,7 +9,38 @@ import { cn } from '@/lib/utils'
 import {
   ShieldCheck, Loader2, AlertTriangle,
   CheckCircle2, TrendingUp, Clock, RefreshCw, FolderOpen,
+  Upload, Tag, ArrowRight, XCircle,
 } from 'lucide-react'
+
+// ── Types for Grant Tagging ────────────────────────────────────────────────
+
+interface TagChange {
+  purchase_id: string
+  sync_token: string
+  line_id: string
+  txn_date: string
+  vendor: string
+  account_name: string
+  class_name: string
+  amount: number
+  current_grant: string
+  expected_grant: string
+  expected_customer_id: string
+  grant_name: string
+}
+
+interface TagPreviewResult {
+  summary: {
+    changes_needed: number
+    already_correct: number
+    no_rule_found: number
+    multi_grant_lines: number
+    grants_in_excel: number
+    rules_parsed: number
+  }
+  changes: TagChange[]
+  multi_grant_lines: { program: string; account_num: string; description: string; grants: { name: string; amount: number }[] }[]
+}
 
 const ALLAPATTAH_REALM = '9341454010854556'
 
@@ -24,6 +55,18 @@ export function GrantsPage() {
 
   const [selectedItem, setSelectedItem] = useState<QBODonor | QBOProject | null>(null)
   const [result, setResult] = useState<string | null>(null)
+
+  // Grant Tagging state
+  const [tagFile, setTagFile] = useState<File | null>(null)
+  const [tagPeriodStart, setTagPeriodStart] = useState('2026-01-01')
+  const [tagPeriodEnd, setTagPeriodEnd] = useState('2026-12-31')
+  const [tagLoading, setTagLoading] = useState(false)
+  const [tagPreview, setTagPreview] = useState<TagPreviewResult | null>(null)
+  const [tagApplyLoading, setTagApplyLoading] = useState(false)
+  const [tagApplyResult, setTagApplyResult] = useState<{ applied: number; errors: number } | null>(null)
+  const [tagError, setTagError] = useState<string | null>(null)
+  const [selectedChanges, setSelectedChanges] = useState<Set<string>>(new Set())
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const isAllapattah = selectedRealmId === ALLAPATTAH_REALM
 
@@ -58,6 +101,49 @@ export function GrantsPage() {
     },
     onSuccess: (d) => setResult(d.content),
   })
+
+  // Grant Tagging handlers
+  const runTagPreview = async () => {
+    if (!tagFile || !selectedRealmId) return
+    setTagLoading(true)
+    setTagError(null)
+    setTagPreview(null)
+    setTagApplyResult(null)
+    setSelectedChanges(new Set())
+    try {
+      const result = await api.grants.tagPreview(tagFile, selectedRealmId, tagPeriodStart, tagPeriodEnd)
+      setTagPreview(result)
+      // Select all changes by default
+      setSelectedChanges(new Set(result.changes.map((c: TagChange) => `${c.purchase_id}:${c.line_id}`)))
+    } catch (err: any) {
+      setTagError(err?.response?.data?.detail || err?.message || 'Error running preview')
+    } finally {
+      setTagLoading(false)
+    }
+  }
+
+  const applyTagChanges = async () => {
+    if (!tagPreview || !selectedRealmId) return
+    const toApply = tagPreview.changes.filter(c => selectedChanges.has(`${c.purchase_id}:${c.line_id}`))
+    if (toApply.length === 0) return
+    setTagApplyLoading(true)
+    try {
+      const result = await api.grants.tagApply(selectedRealmId, toApply)
+      setTagApplyResult({ applied: result.applied, errors: result.errors })
+    } catch (err: any) {
+      setTagError(err?.response?.data?.detail || err?.message || 'Error applying changes')
+    } finally {
+      setTagApplyLoading(false)
+    }
+  }
+
+  const toggleChange = (key: string) => {
+    setSelectedChanges(prev => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
 
   // KPI totals
   const totalBalance = donors.reduce((sum, d) => sum + d.balance, 0)
@@ -246,6 +332,192 @@ export function GrantsPage() {
               </div>
             )}
           </div>
+        </div>
+
+        {/* ── Grant Tagging from Budget Excel ─────────────────────────────── */}
+        <div className="card p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <Tag size={16} className="text-primary-600" />
+            <h2 className="text-sm font-semibold text-surface-900">Asignar Grants a Gastos de QBO</h2>
+          </div>
+          <p className="text-xs text-surface-500">
+            Sube el archivo Excel con la hoja BUDGET y el agente identifica qué transacciones de QBO
+            necesitan que se les asigne o corrija el grant.
+          </p>
+
+          {/* File + period inputs */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="block text-[11px] font-medium text-surface-600 mb-1">Excel (BUDGET)</label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={e => setTagFile(e.target.files?.[0] ?? null)}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 rounded-lg border border-dashed border-surface-300 bg-surface-50 px-3 py-2 text-xs text-surface-600 hover:border-primary-400 hover:bg-primary-50 transition-colors"
+              >
+                <Upload size={13} />
+                {tagFile ? tagFile.name : 'Seleccionar archivo'}
+              </button>
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-surface-600 mb-1">Desde</label>
+              <input
+                type="date"
+                value={tagPeriodStart}
+                onChange={e => setTagPeriodStart(e.target.value)}
+                className="rounded-lg border border-surface-200 px-2 py-1.5 text-xs text-surface-800 focus:outline-none focus:ring-1 focus:ring-primary-400"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-surface-600 mb-1">Hasta</label>
+              <input
+                type="date"
+                value={tagPeriodEnd}
+                onChange={e => setTagPeriodEnd(e.target.value)}
+                className="rounded-lg border border-surface-200 px-2 py-1.5 text-xs text-surface-800 focus:outline-none focus:ring-1 focus:ring-primary-400"
+              />
+            </div>
+            <button
+              onClick={runTagPreview}
+              disabled={!tagFile || !selectedRealmId || tagLoading}
+              className="btn-primary text-[13px]"
+            >
+              {tagLoading
+                ? <><Loader2 size={13} className="animate-spin" /> Analizando…</>
+                : <><Tag size={13} /> Ver Preview</>
+              }
+            </button>
+          </div>
+
+          {/* Error */}
+          {tagError && (
+            <div className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+              <XCircle size={13} />
+              {tagError}
+            </div>
+          )}
+
+          {/* Preview results */}
+          {tagPreview && (
+            <div className="space-y-4">
+              {/* Summary cards */}
+              <div className="grid grid-cols-4 gap-3">
+                {[
+                  { label: 'Cambios necesarios', value: tagPreview.summary.changes_needed, color: 'text-amber-700 bg-amber-50 border-amber-200' },
+                  { label: 'Ya correctos', value: tagPreview.summary.already_correct, color: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
+                  { label: 'Sin regla', value: tagPreview.summary.no_rule_found, color: 'text-surface-600 bg-surface-50 border-surface-200' },
+                  { label: 'Multi-grant (manual)', value: tagPreview.summary.multi_grant_lines, color: 'text-purple-700 bg-purple-50 border-purple-200' },
+                ].map(s => (
+                  <div key={s.label} className={cn('rounded-lg border p-3', s.color)}>
+                    <p className="text-[11px] font-medium opacity-75">{s.label}</p>
+                    <p className="text-xl font-bold">{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Apply result */}
+              {tagApplyResult && (
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-700 font-medium">
+                  <CheckCircle2 size={13} />
+                  {tagApplyResult.applied} transacciones actualizadas en QBO.
+                  {tagApplyResult.errors > 0 && ` (${tagApplyResult.errors} errores)`}
+                </div>
+              )}
+
+              {/* Changes table */}
+              {tagPreview.changes.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-surface-700">
+                      {selectedChanges.size} de {tagPreview.changes.length} cambios seleccionados
+                    </p>
+                    <button
+                      onClick={applyTagChanges}
+                      disabled={selectedChanges.size === 0 || tagApplyLoading}
+                      className="btn-primary text-[12px]"
+                    >
+                      {tagApplyLoading
+                        ? <><Loader2 size={12} className="animate-spin" /> Aplicando…</>
+                        : <><CheckCircle2 size={12} /> Aplicar en QBO ({selectedChanges.size})</>
+                      }
+                    </button>
+                  </div>
+
+                  <div className="rounded-xl border border-surface-200 overflow-hidden">
+                    <div className="max-h-72 overflow-y-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-surface-50 sticky top-0 border-b border-surface-200">
+                          <tr>
+                            <th className="px-2 py-2 text-left font-medium text-surface-500 w-7">
+                              <input
+                                type="checkbox"
+                                checked={selectedChanges.size === tagPreview.changes.length}
+                                onChange={() => {
+                                  if (selectedChanges.size === tagPreview.changes.length) {
+                                    setSelectedChanges(new Set())
+                                  } else {
+                                    setSelectedChanges(new Set(tagPreview.changes.map(c => `${c.purchase_id}:${c.line_id}`)))
+                                  }
+                                }}
+                              />
+                            </th>
+                            <th className="px-2 py-2 text-left font-medium text-surface-500">Fecha</th>
+                            <th className="px-2 py-2 text-left font-medium text-surface-500">Proveedor</th>
+                            <th className="px-2 py-2 text-left font-medium text-surface-500">Cuenta</th>
+                            <th className="px-2 py-2 text-right font-medium text-surface-500">Monto</th>
+                            <th className="px-2 py-2 text-left font-medium text-surface-500">Grant actual</th>
+                            <th className="px-2 py-2 w-4" />
+                            <th className="px-2 py-2 text-left font-medium text-surface-500">Grant correcto</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-surface-100">
+                          {tagPreview.changes.map(c => {
+                            const key = `${c.purchase_id}:${c.line_id}`
+                            const checked = selectedChanges.has(key)
+                            return (
+                              <tr
+                                key={key}
+                                onClick={() => toggleChange(key)}
+                                className={cn(
+                                  'cursor-pointer transition-colors',
+                                  checked ? 'bg-primary-50 hover:bg-primary-100' : 'hover:bg-surface-50',
+                                )}
+                              >
+                                <td className="px-2 py-2">
+                                  <input type="checkbox" checked={checked} onChange={() => toggleChange(key)} onClick={e => e.stopPropagation()} />
+                                </td>
+                                <td className="px-2 py-2 text-surface-600 whitespace-nowrap">{c.txn_date}</td>
+                                <td className="px-2 py-2 text-surface-800 max-w-[120px] truncate">{c.vendor || '—'}</td>
+                                <td className="px-2 py-2 text-surface-500 max-w-[100px] truncate">{c.account_name}</td>
+                                <td className="px-2 py-2 text-right text-surface-800 font-medium whitespace-nowrap">
+                                  ${c.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                                </td>
+                                <td className="px-2 py-2 text-red-600 max-w-[120px] truncate">{c.current_grant}</td>
+                                <td className="px-2 py-2 text-surface-300"><ArrowRight size={10} /></td>
+                                <td className="px-2 py-2 text-emerald-700 font-medium max-w-[140px] truncate">{c.expected_grant}</td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {tagPreview.changes.length === 0 && (
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-700">
+                  <CheckCircle2 size={13} />
+                  Todas las transacciones ya tienen el grant correcto.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
