@@ -251,44 +251,62 @@ def _norm_customer_name(s: str) -> str:
 def _resolve_customer(qbo_project: str, customer_map: dict) -> tuple[str | None, str | None]:
     """Resolve a QBO project name from the SETUP sheet to (customer_id, display_name).
 
-    Strategy (most to least strict):
-    1. Exact match
-    2. Normalized match (ignore case/dash variants)
-    3. Exact match after stripping dollar amounts in parentheses
-    4. Normalized prefix (≥15 chars) — conservative, avoids false positives
+    QBO uses hierarchical names like "Parent:Child Name". The SETUP sheet usually
+    only has the child portion (e.g. "Truist Foundation ($100,000) Q1 - 2026")
+    while QBO stores "Truist Bank:Truist Foundation ($100,000) Q1 - 2026".
+
+    Strategy:
+    1. Exact match on FullyQualifiedName or DisplayName
+    2. Normalized full match (case/dash insensitive)
+    3. QBO last segment match — qbo_project matches the part after the last ':'
+    4. qbo_project is a substring of QBO name (or vice versa, min 15 chars)
+    5. Conservative prefix match (≥15 chars, unique)
     """
     import re
 
     if not qbo_project:
         return None, None
 
+    proj_norm = _norm_customer_name(qbo_project)
+
     # 1. Exact match
     if qbo_project in customer_map:
         c = customer_map[qbo_project]
         return c["Id"], c.get("FullyQualifiedName") or c.get("DisplayName")
-
-    proj_norm = _norm_customer_name(qbo_project)
 
     # 2. Normalized full match
     for cname, cdata in customer_map.items():
         if _norm_customer_name(cname) == proj_norm:
             return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
 
-    # 3. Strip trailing parenthetical (dollar amounts, years) and try again
-    base = re.sub(r'\s*[\(\[].*[\)\]]\s*$', '', qbo_project).strip()
-    if base and base != qbo_project:
-        base_norm = _norm_customer_name(base)
-        for cname, cdata in customer_map.items():
-            cname_norm = _norm_customer_name(cname)
-            if cname_norm == base_norm or cname_norm.startswith(base_norm + ' ') or cname_norm.startswith(base_norm + ':'):
+    # 3. QBO hierarchical name — check if qbo_project matches the last segment after ':'
+    # e.g. "Truist Bank:Truist Foundation ($100,000) Q1 - 2026" → last segment = "Truist Foundation..."
+    for cname, cdata in customer_map.items():
+        if ':' in cname:
+            last_segment = cname.split(':')[-1].strip()
+            if _norm_customer_name(last_segment) == proj_norm:
                 return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
 
-    # 4. Conservative prefix match — only if prefix is at least 15 chars and UNIQUE
+    # 3b. Also try matching qbo_project against each segment of a hierarchical name
+    for cname, cdata in customer_map.items():
+        cname_norm = _norm_customer_name(cname)
+        # qbo_project is a suffix of QBO name (after colon)
+        if cname_norm.endswith(':' + proj_norm) or cname_norm.endswith(' ' + proj_norm):
+            return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+
+    # 4. Substring match (min 15 chars to avoid false positives)
+    if len(proj_norm) >= 15:
+        for cname, cdata in customer_map.items():
+            cname_norm = _norm_customer_name(cname)
+            if proj_norm in cname_norm or cname_norm in proj_norm:
+                return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+
+    # 5. Conservative prefix match — only if UNIQUE (no ambiguity)
     prefix = proj_norm[:20] if len(proj_norm) >= 15 else None
     if prefix:
         matches = [(cname, cdata) for cname, cdata in customer_map.items()
                    if _norm_customer_name(cname).startswith(prefix)]
-        if len(matches) == 1:  # only match if unambiguous
+        if len(matches) == 1:
             cdata = matches[0][1]
             return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
 
@@ -674,12 +692,13 @@ async def preview_grant_tagging(
                 "grant_name": gname,
                 "qbo_project": ginfo["qbo_project"],
                 "customer_id": cid,
-                "customer_display": cdisplay or ginfo["qbo_project"],
+                "customer_display": cdisplay or ginfo["qbo_project"] or gname,
+                "resolved": cid is not None,
                 "total_available": ginfo["total_available"],
             }
             for gname, ginfo in grants_map.items()
             for cid, cdisplay in [_resolve_customer(ginfo["qbo_project"], customer_map)]
-            if cid  # only include grants we could resolve to a QBO customer
+            # Include ALL grants — resolved or not, so dropdowns have all options
         ],
     }
 
@@ -792,6 +811,32 @@ async def apply_grant_tagging(
     """
     client = await get_qbo_client_for_realm(realm_id, db)
 
+    # Fetch customer map so we can resolve by name when customer_id is missing
+    try:
+        customers = await client.get_customers()
+        customer_map: dict[str, dict] = {}
+        for c in customers:
+            name = c.get("FullyQualifiedName") or c.get("DisplayName", "")
+            if name:
+                customer_map[name] = c
+    except Exception:
+        customer_map = {}
+
+    def _get_customer_id(change: dict) -> str | None:
+        """Get the customer_id, resolving by display name if needed."""
+        cid = change.get("expected_customer_id")
+        if cid:
+            return cid
+        display = change.get("expected_grant") or change.get("customer_display") or ""
+        if display:
+            resolved_id, _ = _resolve_customer(display, customer_map)
+            if resolved_id:
+                return resolved_id
+            # Last resort: search by exact display name key
+            if display in customer_map:
+                return customer_map[display]["Id"]
+        return None
+
     # Group changes by purchase_id so we update each Purchase once
     purchases_to_update: dict[str, list[dict]] = {}
     for change in changes:
@@ -808,25 +853,39 @@ async def apply_grant_tagging(
             purchase = raw.get("Purchase") or raw  # unwrap if nested
             sync_token = purchase.get("SyncToken", "0")
 
-            # Build a map: line_id → expected_customer_id
-            line_update_map: dict[str, dict] = {
-                lc["line_id"]: {
-                    "customer_id": lc["expected_customer_id"],
-                    "grant_name": lc["expected_grant"],
-                }
+            # Determine if any change wants to apply to ALL lines (pending manual)
+            apply_to_all = any(c.get("apply_to_all_lines") for c in line_changes)
+
+            # Build a map: line_id → customer_id
+            line_update_map: dict[str, str | None] = {
+                lc["line_id"]: _get_customer_id(lc)
                 for lc in line_changes
+                if not lc.get("apply_to_all_lines")
             }
+            # For apply_to_all, get the customer_id from the first matching change
+            all_lines_customer_id: str | None = None
+            if apply_to_all:
+                for lc in line_changes:
+                    if lc.get("apply_to_all_lines"):
+                        all_lines_customer_id = _get_customer_id(lc)
+                        break
 
             # Update matching lines
             updated_count = 0
             for line in purchase.get("Line", []):
                 line_id = line.get("Id", "")
-                update = line_update_map.get(line_id)
-                if not update:
-                    continue
                 detail = line.get("AccountBasedExpenseLineDetail")
-                if detail:
-                    detail["CustomerRef"] = {"value": update["customer_id"]}
+                if not detail:
+                    continue
+
+                target_customer_id: str | None = None
+                if apply_to_all and all_lines_customer_id:
+                    target_customer_id = all_lines_customer_id
+                elif line_id in line_update_map:
+                    target_customer_id = line_update_map[line_id]
+
+                if target_customer_id:
+                    detail["CustomerRef"] = {"value": target_customer_id}
                     updated_count += 1
 
             if updated_count == 0:

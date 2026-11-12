@@ -196,16 +196,18 @@ export function GrantsPage() {
       purchase_id: sel.purchase_id,
       sync_token: '',
       line_id: sel.line_id,
-      expected_customer_id: sel.customer_id,
+      expected_customer_id: sel.customer_id || '',
       expected_grant: sel.customer_display,
+      customer_display: sel.customer_display,
     }))
     // Also include pending transactions with manually selected grants
     const pendingApply = Object.values(pendingSelections).map(sel => ({
       purchase_id: sel.purchase_id,
       sync_token: '',
-      line_id: '',  // apply to ALL lines of this purchase
-      expected_customer_id: sel.customer_id,
+      line_id: '',
+      expected_customer_id: sel.customer_id || '',
       expected_grant: sel.customer_display,
+      customer_display: sel.customer_display,
       apply_to_all_lines: true,
     }))
     const allChanges = [...toApply, ...multiApply, ...pendingApply]
@@ -605,26 +607,30 @@ export function GrantsPage() {
                                     className="text-[11px] rounded border border-blue-300 bg-white px-1 py-0.5 w-full max-w-[200px]"
                                     value={selected?.customer_id ?? ''}
                                     onChange={e => {
-                                      const opt = item.grant_options.find(g => g.customer_id === e.target.value)
-                                      if (opt && opt.customer_id) {
+                                      const val = e.target.value
+                                      if (!val) {
+                                        setMultiSelections(prev => { const n = {...prev}; delete n[key]; return n })
+                                        return
+                                      }
+                                      // Find by customer_id OR by display name (fallback)
+                                      const opt = item.grant_options.find(g => (g.customer_id ?? g.customer_display) === val)
+                                      if (opt) {
                                         setMultiSelections(prev => ({
                                           ...prev,
                                           [key]: {
-                                            customer_id: opt.customer_id!,
+                                            customer_id: opt.customer_id ?? '',
                                             customer_display: opt.customer_display,
                                             purchase_id: item.purchase_id,
                                             sync_token: item.sync_token,
                                             line_id: item.line_id,
                                           }
                                         }))
-                                      } else {
-                                        setMultiSelections(prev => { const n = {...prev}; delete n[key]; return n })
                                       }
                                     }}
                                   >
                                     <option value="">— seleccionar —</option>
                                     {item.grant_options.map((opt, j) => (
-                                      <option key={j} value={opt.customer_id ?? ''} disabled={!opt.customer_id}>
+                                      <option key={j} value={opt.customer_id ?? opt.customer_display}>
                                         {opt.customer_display} (${opt.amount_in_budget.toLocaleString()})
                                       </option>
                                     ))}
@@ -765,27 +771,33 @@ export function GrantsPage() {
                               <td className="px-2 py-1 text-right">${row.amount.toFixed(2)}</td>
                               <td className="px-2 py-1">
                                 <select
-                                  className="text-[11px] rounded border border-orange-300 bg-white px-1 py-0.5 w-full max-w-[200px]"
-                                  value={sel?.customer_id ?? ''}
+                                  className="text-[11px] rounded border border-orange-300 bg-white px-1 py-0.5 w-full max-w-[220px]"
+                                  value={sel?.customer_id || sel?.customer_display || ''}
                                   onChange={e => {
-                                    const grant = (tagPreview.grants_resolved ?? []).find(g => g.customer_id === e.target.value)
+                                    const val = e.target.value
+                                    if (!val) {
+                                      setPendingSelections(prev => { const n = {...prev}; delete n[row.purchase_id]; return n })
+                                      return
+                                    }
+                                    // Find by customer_id OR by display name
+                                    const grant = (tagPreview.grants_resolved ?? []).find(g => (g.customer_id ?? g.customer_display) === val)
                                     if (grant) {
                                       setPendingSelections(prev => ({
                                         ...prev,
                                         [row.purchase_id]: {
-                                          customer_id: grant.customer_id,
+                                          customer_id: grant.customer_id ?? '',
                                           customer_display: grant.customer_display,
                                           purchase_id: row.purchase_id,
                                         }
                                       }))
-                                    } else {
-                                      setPendingSelections(prev => { const n = {...prev}; delete n[row.purchase_id]; return n })
                                     }
                                   }}
                                 >
                                   <option value="">— seleccionar grant —</option>
-                                  {(tagPreview.grants_resolved ?? []).map((g, j) => (
-                                    <option key={j} value={g.customer_id}>{g.customer_display}</option>
+                                  {(tagPreview.grants_resolved ?? []).sort((a,b) => a.customer_display.localeCompare(b.customer_display)).map((g, j) => (
+                                    <option key={j} value={g.customer_id ?? g.customer_display}>
+                                      {g.customer_display}{!g.resolved ? ' ⚠️' : ''}
+                                    </option>
                                   ))}
                                 </select>
                               </td>
