@@ -208,21 +208,7 @@ def _build_rule_index(
         # Resolve QBO project name → customer ID
         grant_info = grants_map.get(grant_name, {})
         qbo_project = grant_info.get("qbo_project", "")
-        customer_id: str | None = None
-        customer_display: str | None = None
-
-        # Try exact match first, then partial
-        if qbo_project and qbo_project in customer_map:
-            customer_id = customer_map[qbo_project]["Id"]
-            customer_display = customer_map[qbo_project].get("FullyQualifiedName") or customer_map[qbo_project].get("DisplayName")
-        else:
-            # Partial match on first 30 chars
-            prefix = qbo_project[:30].lower() if qbo_project else ""
-            for cname, cdata in customer_map.items():
-                if prefix and prefix in cname.lower():
-                    customer_id = cdata["Id"]
-                    customer_display = cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
-                    break
+        customer_id, customer_display = _resolve_customer(qbo_project, customer_map)
 
         key = (account_num, program_key)
         # If multiple rules share the same key, keep the one with the larger assignment
@@ -240,24 +226,90 @@ def _build_rule_index(
     return index
 
 
+def _resolve_customer(qbo_project: str, customer_map: dict) -> tuple[str | None, str | None]:
+    """Resolve a QBO project name to (customer_id, customer_display_name)."""
+    if not qbo_project:
+        return None, None
+    if qbo_project in customer_map:
+        c = customer_map[qbo_project]
+        return c["Id"], c.get("FullyQualifiedName") or c.get("DisplayName")
+    prefix = qbo_project[:30].lower()
+    for cname, cdata in customer_map.items():
+        if prefix and prefix in cname.lower():
+            return cdata["Id"], cdata.get("FullyQualifiedName") or cdata.get("DisplayName")
+    return None, None
+
+
+def _build_multi_rule_index(
+    tagging_rules: list[dict],
+    grants_map: dict[str, dict],
+    customer_map: dict[str, dict],
+) -> dict[tuple[str, str], dict]:
+    """Build lookup index for multi-grant lines.
+
+    Returns: (account_num, program_key) → {
+        account_name, description,
+        grant_options: [{grant_name, amount_in_budget, customer_id, customer_display}]
+    }
+    """
+    index: dict[tuple[str, str], dict] = {}
+
+    for rule in tagging_rules:
+        if rule["is_simple"] or not rule["grants"]:
+            continue  # handled by simple index
+
+        account_num = rule["account_num"]
+        program_key = rule["program"].upper()
+
+        grant_options = []
+        for grant_name, amount in rule["grants"]:
+            grant_info = grants_map.get(grant_name, {})
+            qbo_project = grant_info.get("qbo_project", "")
+            customer_id, customer_display = _resolve_customer(qbo_project, customer_map)
+            grant_options.append({
+                "grant_name": grant_name,
+                "amount_in_budget": amount,
+                "customer_id": customer_id,
+                "customer_display": customer_display or qbo_project or grant_name,
+            })
+
+        key = (account_num, program_key)
+        # Merge options if same key appears more than once
+        if key in index:
+            # Add any new grant options not already present
+            existing_names = {g["grant_name"] for g in index[key]["grant_options"]}
+            for opt in grant_options:
+                if opt["grant_name"] not in existing_names:
+                    index[key]["grant_options"].append(opt)
+        else:
+            index[key] = {
+                "account_name": rule["account_name"],
+                "description": rule["description"],
+                "grant_options": grant_options,
+            }
+
+    return index
+
+
 def _find_rule(
     account_name_qbo: str,
     class_name_qbo: str,
     rule_index: dict[tuple[str, str], dict],
 ) -> dict | None:
-    """Find the best matching rule for a QBO transaction line.
+    """Find the matching rule for a QBO transaction line.
 
-    Tries program-aware match first, then account-only fallback.
+    IMPORTANT: We require BOTH account AND program/class to match.
+    The same account number (e.g. 6615 Travel:Taxi) can appear in multiple
+    programs with DIFFERENT grants — matching by account alone would assign
+    the wrong grant. If the transaction has no class, return None (manual review).
     """
-    # Pass 1: try full match (account + program)
+    if not class_name_qbo:
+        # Cannot determine program without a class → no auto-match
+        return None
+
     for (acct_num, prog_key), rule_info in rule_index.items():
         if _match_account_num(account_name_qbo, acct_num, rule_info.get("account_name", "")) \
                 and _match_program(class_name_qbo, prog_key):
-            return rule_info
-
-    # Pass 2: account-only fallback (ignore class — catches unclassed transactions)
-    for (acct_num, prog_key), rule_info in rule_index.items():
-        if _match_account_num(account_name_qbo, acct_num, rule_info.get("account_name", "")):
             return rule_info
 
     return None
@@ -315,18 +367,33 @@ def _match_account_num(account_name: str, account_num: str, account_name_budget:
 
 
 def _match_program(class_name: str, program_key: str) -> bool:
-    """True if the QBO class name contains the program key (or is empty → accept all)."""
-    if not class_name:
-        # No class assigned — allow matching by account number alone (looser)
-        return True
-    if not program_key:
+    """True if the QBO class name contains the program key.
+
+    Requires class_name to be non-empty — if the transaction has no class,
+    we cannot determine which program it belongs to and should NOT auto-match
+    (same account number appears in multiple programs with DIFFERENT grants).
+    """
+    if not class_name or not program_key:
         return False
-    # QBO class names are like "Programs:Small Business Growth:SBRC"
-    # program_key is like "SBRC"
-    # Also handle spaces vs underscores/dashes
-    class_upper = class_name.upper().replace("-", " ").replace("_", " ")
-    prog_upper = program_key.upper().replace("-", " ").replace("_", " ")
-    return prog_upper in class_upper
+    # QBO class names are like "Programs:SBRC" or "Programs:Capital Readiness & TA"
+    # program_key is the BUDGET sheet program name, e.g. "CAPITAL READINESS & TA"
+    # Normalize both: upper, collapse punctuation/spaces
+    def _norm(s: str) -> str:
+        return s.upper().replace("&", "AND").replace("-", " ").replace("_", " ").replace(":", " ")
+
+    class_norm = _norm(class_name)
+    prog_norm = _norm(program_key)
+
+    # Exact substring match after normalization
+    if prog_norm in class_norm:
+        return True
+
+    # Also try matching each word of the program key (≥4 chars) in the class name
+    words = [w for w in prog_norm.split() if len(w) >= 4]
+    if words and all(w in class_norm for w in words):
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -392,10 +459,11 @@ async def preview_grant_tagging(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"QBO expense fetch failed: {exc}") from exc
 
-    # --- Build rule index ---
+    # --- Build rule indexes ---
     rule_index = _build_rule_index(tagging_rules, programs_map, grants_map, customer_map)
+    multi_rule_index = _build_multi_rule_index(tagging_rules, grants_map, customer_map)
 
-    # --- Identify multi-grant rules (manual review) ---
+    # --- Identify multi-grant budget lines (for the summary section) ---
     multi_grant_lines = [
         {
             "program": r["program"],
@@ -410,8 +478,10 @@ async def preview_grant_tagging(
 
     # --- Match QBO transactions to rules ---
     changes: list[dict] = []
+    needs_selection: list[dict] = []  # multi-grant: user must choose which grant to assign
     already_correct: int = 0
     no_rule: int = 0
+    no_class: int = 0        # transaction has no class → can't determine program → no auto-match
     skipped_payroll: int = 0
     pending_no_rule: list[dict] = []   # has Pending Allocations but couldn't match a rule
 
@@ -442,7 +512,35 @@ async def preview_grant_tagging(
             matched_rule = _find_rule(account_name, class_name, rule_index)
 
             if not matched_rule:
-                no_rule += 1
+                # Check multi-grant index — same matching logic
+                multi_matched = None
+                if class_name:
+                    for (acct_num, prog_key), minfo in multi_rule_index.items():
+                        if _match_account_num(account_name, acct_num, minfo.get("account_name", "")) \
+                                and _match_program(class_name, prog_key):
+                            multi_matched = minfo
+                            break
+
+                if multi_matched:
+                    # Transaction matches a multi-grant line → needs manual selection
+                    needs_selection.append({
+                        "purchase_id": txn_id,
+                        "sync_token": sync_token,
+                        "line_id": line.get("Id", ""),
+                        "txn_date": txn_date,
+                        "vendor": vendor,
+                        "account_name": account_name,
+                        "class_name": class_name,
+                        "amount": detail["amount"],
+                        "current_grant": current_customer_name or "(sin grant)",
+                        "grant_options": multi_matched["grant_options"],
+                    })
+                    continue
+
+                if not class_name:
+                    no_class += 1
+                else:
+                    no_rule += 1
                 # Even without a rule, flag Pending Allocations for manual attention
                 if _is_pending_allocation(current_customer_name):
                     pending_no_rule.append({
@@ -450,7 +548,7 @@ async def preview_grant_tagging(
                         "txn_date": txn_date,
                         "vendor": vendor,
                         "account_name": account_name,
-                        "class_name": class_name,
+                        "class_name": class_name or "(sin clase)",
                         "amount": detail["amount"],
                         "current_grant": current_customer_name or "(sin grant)",
                     })
@@ -484,17 +582,19 @@ async def preview_grant_tagging(
             })
 
     logger.info(
-        "Preview: changes=%d already_correct=%d no_rule=%d pending_no_rule=%d "
-        "skipped_payroll=%d multi_grant_lines=%d",
-        len(changes), already_correct, no_rule, len(pending_no_rule),
-        skipped_payroll, len(multi_grant_lines),
+        "Preview: changes=%d needs_selection=%d already_correct=%d "
+        "no_rule=%d no_class=%d pending_no_rule=%d skipped_payroll=%d",
+        len(changes), len(needs_selection), already_correct,
+        no_rule, no_class, len(pending_no_rule), skipped_payroll,
     )
 
     return {
         "summary": {
             "changes_needed": len(changes),
+            "needs_selection": len(needs_selection),
             "already_correct": already_correct,
             "no_rule_found": no_rule,
+            "no_class_assigned": no_class,
             "pending_no_rule": len(pending_no_rule),
             "skipped_payroll": skipped_payroll,
             "multi_grant_lines": len(multi_grant_lines),
@@ -502,7 +602,8 @@ async def preview_grant_tagging(
             "rules_parsed": len(tagging_rules),
         },
         "changes": sorted(changes, key=lambda x: (x["txn_date"], x["vendor"])),
-        "pending_no_rule": pending_no_rule[:100],   # capped to avoid huge payloads
+        "needs_selection": sorted(needs_selection, key=lambda x: (x["txn_date"], x["vendor"])),
+        "pending_no_rule": pending_no_rule[:100],
         "multi_grant_lines": multi_grant_lines,
         "grants_resolved": [
             {

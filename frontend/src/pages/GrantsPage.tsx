@@ -27,13 +27,36 @@ interface TagChange {
   expected_grant: string
   expected_customer_id: string
   grant_name: string
+  is_pending_allocation?: boolean
+}
+
+interface GrantOption {
+  grant_name: string
+  amount_in_budget: number
+  customer_id: string | null
+  customer_display: string
+}
+
+interface NeedsSelectionItem {
+  purchase_id: string
+  sync_token: string
+  line_id: string
+  txn_date: string
+  vendor: string
+  account_name: string
+  class_name: string
+  amount: number
+  current_grant: string
+  grant_options: GrantOption[]
 }
 
 interface TagPreviewResult {
   summary: {
     changes_needed: number
+    needs_selection: number
     already_correct: number
     no_rule_found: number
+    no_class_assigned: number
     pending_no_rule: number
     skipped_payroll: number
     multi_grant_lines: number
@@ -41,6 +64,7 @@ interface TagPreviewResult {
     rules_parsed: number
   }
   changes: TagChange[]
+  needs_selection: NeedsSelectionItem[]
   pending_no_rule: { purchase_id: string; txn_date: string; vendor: string; account_name: string; class_name: string; amount: number; current_grant: string }[]
   multi_grant_lines: { program: string; account_num: string; description: string; grants: { name: string; amount: number }[] }[]
 }
@@ -73,6 +97,9 @@ export function GrantsPage() {
   const [scanLoading, setScanLoading] = useState(false)
   const [scanResult, setScanResult] = useState<{ total: number; pending: number; grants: Record<string, number>; accounts: { account_name: string; line_count: number; classes: string[]; grants: string[] }[] } | null>(null)
   const [showScan, setShowScan] = useState(false)
+  // Multi-grant selection: key = `${purchase_id}:${line_id}`, value = chosen grant info
+  const [multiSelections, setMultiSelections] = useState<Record<string, { customer_id: string; customer_display: string; purchase_id: string; sync_token: string; line_id: string }>>({})
+
 
   const isAllapattah = selectedRealmId === ALLAPATTAH_REALM
 
@@ -153,10 +180,19 @@ export function GrantsPage() {
   const applyTagChanges = async () => {
     if (!tagPreview || !selectedRealmId) return
     const toApply = tagPreview.changes.filter(c => selectedChanges.has(`${c.purchase_id}:${c.line_id}`))
-    if (toApply.length === 0) return
+    // Also include confirmed multi-grant selections
+    const multiApply = Object.values(multiSelections).map(sel => ({
+      purchase_id: sel.purchase_id,
+      sync_token: '',  // will be refreshed server-side
+      line_id: sel.line_id,
+      expected_customer_id: sel.customer_id,
+      expected_grant: sel.customer_display,
+    }))
+    const allChanges = [...toApply, ...multiApply]
+    if (allChanges.length === 0) return
     setTagApplyLoading(true)
     try {
-      const result = await api.grants.tagApply(selectedRealmId, toApply)
+      const result = await api.grants.tagApply(selectedRealmId, allChanges)
       setTagApplyResult({ applied: result.applied, errors: result.errors })
     } catch (err: any) {
       setTagError(err?.response?.data?.detail || err?.message || 'Error applying changes')
@@ -489,11 +525,12 @@ export function GrantsPage() {
               {/* Summary cards */}
               <div className="grid grid-cols-4 gap-3">
                 {[
-                  { label: 'Cambios necesarios', value: tagPreview.summary.changes_needed, color: 'text-amber-700 bg-amber-50 border-amber-200' },
+                  { label: 'Cambios automáticos', value: tagPreview.summary.changes_needed, color: 'text-amber-700 bg-amber-50 border-amber-200' },
+                  { label: 'Multi-grant (elige grant)', value: tagPreview.summary.needs_selection ?? 0, color: 'text-blue-700 bg-blue-50 border-blue-200' },
                   { label: 'Ya correctos', value: tagPreview.summary.already_correct, color: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
-                  { label: 'Sin regla / no match', value: tagPreview.summary.no_rule_found, color: 'text-surface-600 bg-surface-50 border-surface-200' },
+                  { label: 'Sin clase en QBO', value: tagPreview.summary.no_class_assigned ?? 0, color: 'text-slate-600 bg-slate-50 border-slate-200' },
+                  { label: 'Sin regla (con clase)', value: tagPreview.summary.no_rule_found, color: 'text-surface-600 bg-surface-50 border-surface-200' },
                   { label: 'Pending sin regla', value: tagPreview.summary.pending_no_rule ?? 0, color: 'text-orange-700 bg-orange-50 border-orange-200' },
-                  { label: 'Multi-grant (manual)', value: tagPreview.summary.multi_grant_lines, color: 'text-purple-700 bg-purple-50 border-purple-200' },
                   { label: 'Payroll (omitido)', value: tagPreview.summary.skipped_payroll ?? 0, color: 'text-slate-500 bg-slate-50 border-slate-200' },
                 ].map(s => (
                   <div key={s.label} className={cn('rounded-lg border p-3', s.color)}>
@@ -512,21 +549,93 @@ export function GrantsPage() {
                 </div>
               )}
 
+              {/* Multi-grant selection table */}
+              {(tagPreview.needs_selection?.length ?? 0) > 0 && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-blue-700">
+                      🔀 Multi-grant: elige el grant para cada transacción ({tagPreview.needs_selection.length})
+                    </p>
+                    <span className="text-[10px] text-blue-500">{Object.keys(multiSelections).length} seleccionados</span>
+                  </div>
+                  <div className="rounded-xl border border-blue-200 overflow-hidden">
+                    <div className="max-h-72 overflow-y-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-blue-50 sticky top-0 border-b border-blue-200">
+                          <tr>
+                            {['Fecha','Proveedor','Cuenta','Clase','Grant actual','Monto','→ Elegir grant'].map(h => (
+                              <th key={h} className="px-2 py-1.5 text-left font-medium text-blue-700">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tagPreview.needs_selection.map((item, i) => {
+                            const key = `${item.purchase_id}:${item.line_id}`
+                            const selected = multiSelections[key]
+                            return (
+                              <tr key={i} className={`border-t border-blue-100 ${selected ? 'bg-blue-50/50' : ''}`}>
+                                <td className="px-2 py-1">{item.txn_date}</td>
+                                <td className="px-2 py-1">{item.vendor}</td>
+                                <td className="px-2 py-1 text-surface-500 max-w-[120px] truncate">{item.account_name}</td>
+                                <td className="px-2 py-1 text-surface-500">{item.class_name}</td>
+                                <td className="px-2 py-1 text-orange-600">{item.current_grant}</td>
+                                <td className="px-2 py-1 text-right font-mono">${item.amount.toFixed(2)}</td>
+                                <td className="px-2 py-1">
+                                  <select
+                                    className="text-[11px] rounded border border-blue-300 bg-white px-1 py-0.5 w-full max-w-[200px]"
+                                    value={selected?.customer_id ?? ''}
+                                    onChange={e => {
+                                      const opt = item.grant_options.find(g => g.customer_id === e.target.value)
+                                      if (opt && opt.customer_id) {
+                                        setMultiSelections(prev => ({
+                                          ...prev,
+                                          [key]: {
+                                            customer_id: opt.customer_id!,
+                                            customer_display: opt.customer_display,
+                                            purchase_id: item.purchase_id,
+                                            sync_token: item.sync_token,
+                                            line_id: item.line_id,
+                                          }
+                                        }))
+                                      } else {
+                                        setMultiSelections(prev => { const n = {...prev}; delete n[key]; return n })
+                                      }
+                                    }}
+                                  >
+                                    <option value="">— seleccionar —</option>
+                                    {item.grant_options.map((opt, j) => (
+                                      <option key={j} value={opt.customer_id ?? ''} disabled={!opt.customer_id}>
+                                        {opt.customer_display} (${opt.amount_in_budget.toLocaleString()})
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Changes table */}
               {tagPreview.changes.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs font-semibold text-surface-700">
-                      {selectedChanges.size} de {tagPreview.changes.length} cambios seleccionados
+                      {selectedChanges.size} de {tagPreview.changes.length} automáticos
+                      {Object.keys(multiSelections).length > 0 && ` + ${Object.keys(multiSelections).length} multi-grant`}
                     </p>
                     <button
                       onClick={applyTagChanges}
-                      disabled={selectedChanges.size === 0 || tagApplyLoading}
+                      disabled={(selectedChanges.size === 0 && Object.keys(multiSelections).length === 0) || tagApplyLoading}
                       className="btn-primary text-[12px]"
                     >
                       {tagApplyLoading
                         ? <><Loader2 size={12} className="animate-spin" /> Aplicando…</>
-                        : <><CheckCircle2 size={12} /> Aplicar en QBO ({selectedChanges.size})</>
+                        : <><CheckCircle2 size={12} /> Aplicar en QBO ({selectedChanges.size + Object.keys(multiSelections).length})</>
                       }
                     </button>
                   </div>
