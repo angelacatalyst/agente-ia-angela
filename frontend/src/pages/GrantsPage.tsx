@@ -53,9 +53,10 @@ interface NeedsSelectionItem {
 interface ResolvedGrant {
   grant_name: string
   qbo_project: string
-  customer_id: string
+  customer_id: string | null
   customer_display: string
   total_available: number
+  resolved: boolean
 }
 
 interface TagPreviewResult {
