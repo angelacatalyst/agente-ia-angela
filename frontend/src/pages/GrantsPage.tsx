@@ -34,11 +34,14 @@ interface TagPreviewResult {
     changes_needed: number
     already_correct: number
     no_rule_found: number
+    pending_no_rule: number
+    skipped_payroll: number
     multi_grant_lines: number
     grants_in_excel: number
     rules_parsed: number
   }
   changes: TagChange[]
+  pending_no_rule: { purchase_id: string; txn_date: string; vendor: string; account_name: string; class_name: string; amount: number; current_grant: string }[]
   multi_grant_lines: { program: string; account_num: string; description: string; grants: { name: string; amount: number }[] }[]
 }
 
@@ -67,6 +70,9 @@ export function GrantsPage() {
   const [tagError, setTagError] = useState<string | null>(null)
   const [selectedChanges, setSelectedChanges] = useState<Set<string>>(new Set())
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [scanLoading, setScanLoading] = useState(false)
+  const [scanResult, setScanResult] = useState<{ total: number; pending: number; grants: Record<string, number>; accounts: { account_name: string; line_count: number; classes: string[]; grants: string[] }[] } | null>(null)
+  const [showScan, setShowScan] = useState(false)
 
   const isAllapattah = selectedRealmId === ALLAPATTAH_REALM
 
@@ -101,6 +107,28 @@ export function GrantsPage() {
     },
     onSuccess: (d) => setResult(d.content),
   })
+
+  // QBO Scan (diagnostic)
+  const runQboScan = async () => {
+    if (!selectedRealmId) return
+    setScanLoading(true)
+    setTagError(null)
+    try {
+      const data = await api.grants.qboScan(selectedRealmId, tagPeriodStart, tagPeriodEnd)
+      setScanResult({
+        total: data.total_expense_lines,
+        pending: data.pending_allocation_lines,
+        grants: data.grant_breakdown,
+        accounts: data.accounts_summary,
+      })
+      setShowScan(true)
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? String(e)
+      setTagError('Scan error: ' + msg)
+    } finally {
+      setScanLoading(false)
+    }
+  }
 
   // Grant Tagging handlers
   const runTagPreview = async () => {
@@ -392,7 +420,60 @@ export function GrantsPage() {
                 : <><Tag size={13} /> Ver Preview</>
               }
             </button>
+            <button
+              onClick={runQboScan}
+              disabled={!selectedRealmId || scanLoading}
+              className="btn-secondary text-[13px]"
+            >
+              {scanLoading
+                ? <><Loader2 size={13} className="animate-spin" /> Escaneando…</>
+                : <><RefreshCw size={13} /> Diagnóstico QBO</>
+              }
+            </button>
           </div>
+
+          {/* QBO Scan results */}
+          {showScan && scanResult && (
+            <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-blue-800">Diagnóstico QBO — datos reales en QuickBooks</span>
+                <button onClick={() => setShowScan(false)} className="text-blue-500 hover:text-blue-700"><XCircle size={13} /></button>
+              </div>
+              <div className="flex gap-4 mb-2 text-blue-700">
+                <span>Total líneas (sin payroll): <strong>{scanResult.total}</strong></span>
+                <span>Pending Allocations: <strong className="text-orange-600">{scanResult.pending}</strong></span>
+              </div>
+              <p className="font-medium text-blue-700 mb-1">Grants encontrados en QBO:</p>
+              <div className="max-h-28 overflow-y-auto mb-2">
+                {Object.entries(scanResult.grants).map(([g, n]) => (
+                  <div key={g} className="flex justify-between text-blue-600">
+                    <span>{g}</span><span className="font-mono">{n}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="font-medium text-blue-700 mb-1">Cuentas QBO (top 20):</p>
+              <div className="max-h-40 overflow-y-auto">
+                <table className="w-full text-[10px]">
+                  <thead className="bg-blue-100 sticky top-0">
+                    <tr>
+                      <th className="px-2 py-0.5 text-left">Cuenta QBO</th>
+                      <th className="px-2 py-0.5 text-right">Líneas</th>
+                      <th className="px-2 py-0.5 text-left">Clases</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scanResult.accounts.slice(0, 20).map((a, i) => (
+                      <tr key={i} className="border-t border-blue-100">
+                        <td className="px-2 py-0.5">{a.account_name}</td>
+                        <td className="px-2 py-0.5 text-right">{a.line_count}</td>
+                        <td className="px-2 py-0.5 text-blue-500">{a.classes.slice(0, 2).join(', ')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Error */}
           {tagError && (
@@ -410,8 +491,10 @@ export function GrantsPage() {
                 {[
                   { label: 'Cambios necesarios', value: tagPreview.summary.changes_needed, color: 'text-amber-700 bg-amber-50 border-amber-200' },
                   { label: 'Ya correctos', value: tagPreview.summary.already_correct, color: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
-                  { label: 'Sin regla', value: tagPreview.summary.no_rule_found, color: 'text-surface-600 bg-surface-50 border-surface-200' },
+                  { label: 'Sin regla / no match', value: tagPreview.summary.no_rule_found, color: 'text-surface-600 bg-surface-50 border-surface-200' },
+                  { label: 'Pending sin regla', value: tagPreview.summary.pending_no_rule ?? 0, color: 'text-orange-700 bg-orange-50 border-orange-200' },
                   { label: 'Multi-grant (manual)', value: tagPreview.summary.multi_grant_lines, color: 'text-purple-700 bg-purple-50 border-purple-200' },
+                  { label: 'Payroll (omitido)', value: tagPreview.summary.skipped_payroll ?? 0, color: 'text-slate-500 bg-slate-50 border-slate-200' },
                 ].map(s => (
                   <div key={s.label} className={cn('rounded-lg border p-3', s.color)}>
                     <p className="text-[11px] font-medium opacity-75">{s.label}</p>
@@ -510,10 +593,46 @@ export function GrantsPage() {
                 </div>
               )}
 
-              {tagPreview.changes.length === 0 && (
+              {tagPreview.changes.length === 0 && tagPreview.summary.no_rule_found === 0 && (
                 <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-700">
                   <CheckCircle2 size={13} />
                   Todas las transacciones ya tienen el grant correcto.
+                </div>
+              )}
+              {tagPreview.changes.length === 0 && tagPreview.summary.no_rule_found > 0 && (
+                <div className="flex items-center gap-2 rounded-lg bg-orange-50 border border-orange-200 px-3 py-2 text-xs text-orange-700">
+                  <AlertTriangle size={13} />
+                  No se encontraron cambios automáticos, pero {tagPreview.summary.no_rule_found} líneas no pudieron relacionarse con las reglas del Excel. Usa el botón "Diagnóstico QBO" para ver qué cuentas y clases hay en QBO y verificar que coincidan con el Excel.
+                </div>
+              )}
+              {/* Pending with no rule */}
+              {(tagPreview.pending_no_rule?.length ?? 0) > 0 && (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-orange-700 mb-2">
+                    ⚠️ Pending Allocations sin regla automática ({tagPreview.pending_no_rule.length}) — revisar manualmente:
+                  </p>
+                  <div className="max-h-48 overflow-y-auto rounded border border-orange-200">
+                    <table className="w-full text-[11px]">
+                      <thead className="bg-orange-50 sticky top-0">
+                        <tr>
+                          {['Fecha','Proveedor','Cuenta','Clase','Monto'].map(h => (
+                            <th key={h} className="px-2 py-1 text-left font-medium text-orange-800">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tagPreview.pending_no_rule.map((row, i) => (
+                          <tr key={i} className="border-t border-orange-100">
+                            <td className="px-2 py-1">{row.txn_date}</td>
+                            <td className="px-2 py-1">{row.vendor}</td>
+                            <td className="px-2 py-1">{row.account_name}</td>
+                            <td className="px-2 py-1">{row.class_name}</td>
+                            <td className="px-2 py-1 text-right">${row.amount.toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>

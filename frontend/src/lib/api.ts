@@ -153,6 +153,11 @@ export const api = {
       apiClient.post('/grants/tag/apply', changes, {
         params: { realm_id: realmId, dry_run: dryRun ?? false },
       }).then(r => r.data),
+
+    qboScan: (realmId: string, periodStart: string, periodEnd: string) =>
+      apiClient.get('/grants/tag/qbo-scan', {
+        params: { realm_id: realmId, period_start: periodStart, period_end: periodEnd },
+      }).then(r => r.data),
   },
 
   payments: {

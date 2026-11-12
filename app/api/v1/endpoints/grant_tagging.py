@@ -1,8 +1,9 @@
 """Grant Tagging endpoint — upload Budget Excel, preview and apply grant assignments to QBO.
 
 Workflow:
-  POST /grants/tag/preview  → parse Excel + query QBO → return list of changes needed
-  POST /grants/tag/apply    → apply confirmed changes (update CustomerRef on QBO expenses)
+  GET  /grants/tag/qbo-scan  → scan QBO transactions, return unique accounts/classes/grants (diagnostic)
+  POST /grants/tag/preview   → parse Excel + query QBO → return list of changes needed
+  POST /grants/tag/apply     → apply confirmed changes (update CustomerRef on QBO expenses)
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import logging
 from typing import Any
 
 import openpyxl
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,33 @@ from app.core.security import verify_api_key
 
 router = APIRouter(prefix="/grants", tags=["Grant Tagging"])
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Payroll account detection — skip these when tagging grants
+# ---------------------------------------------------------------------------
+_PAYROLL_KEYWORDS = {
+    "payroll", "salary", "salaries", "wage", "wages",
+    "benefits", "401k", "retirement", "fica", "health insurance",
+    "workers comp", "workers' comp", "employment tax",
+}
+
+def _is_payroll_account(account_name: str) -> bool:
+    """Return True if the account looks like a payroll/compensation account."""
+    name_lower = account_name.lower()
+    return any(kw in name_lower for kw in _PAYROLL_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Pending Allocations detection
+# ---------------------------------------------------------------------------
+_PENDING_KEYWORDS = {"pending", "pendiente", "unassigned", "sin asignar"}
+
+def _is_pending_allocation(customer_name: str) -> bool:
+    """Return True if the CustomerRef looks like a placeholder (not a real grant)."""
+    if not customer_name:
+        return True  # no grant assigned at all → also pending
+    name_lower = customer_name.lower()
+    return any(kw in name_lower for kw in _PENDING_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +232,35 @@ def _build_rule_index(
                 "grant_name": grant_name,
                 "customer_id": customer_id,
                 "customer_display": customer_display,
-                "account_name": rule["account_name"],
+                "account_name": rule["account_name"],    # budget account name (for fuzzy match)
                 "description": rule["description"],
                 "total_assigned": rule["total_assigned"],
             }
 
     return index
+
+
+def _find_rule(
+    account_name_qbo: str,
+    class_name_qbo: str,
+    rule_index: dict[tuple[str, str], dict],
+) -> dict | None:
+    """Find the best matching rule for a QBO transaction line.
+
+    Tries program-aware match first, then account-only fallback.
+    """
+    # Pass 1: try full match (account + program)
+    for (acct_num, prog_key), rule_info in rule_index.items():
+        if _match_account_num(account_name_qbo, acct_num, rule_info.get("account_name", "")) \
+                and _match_program(class_name_qbo, prog_key):
+            return rule_info
+
+    # Pass 2: account-only fallback (ignore class — catches unclassed transactions)
+    for (acct_num, prog_key), rule_info in rule_index.items():
+        if _match_account_num(account_name_qbo, acct_num, rule_info.get("account_name", "")):
+            return rule_info
+
+    return None
 
 
 def _extract_line_detail(line: dict) -> dict | None:
@@ -233,20 +284,49 @@ def _extract_line_detail(line: dict) -> dict | None:
     }
 
 
-def _match_account_num(account_name: str, account_num: str) -> bool:
-    """True if the QBO account name starts with the account number."""
-    if not account_name or not account_num:
+def _match_account_num(account_name: str, account_num: str, account_name_budget: str = "") -> bool:
+    """True if the QBO account name matches the budget account.
+
+    Tries multiple strategies:
+    1. QBO name starts with account number (e.g. "6020 Office Supplies")
+    2. Account numbers are identical
+    3. Budget account name is a substring of QBO account name (case-insensitive)
+    4. QBO account name is a substring of budget account name
+    """
+    if not account_name:
         return False
-    return account_name.startswith(account_num + " ") or account_name == account_num
+
+    # Strategy 1 & 2: exact number prefix
+    if account_num:
+        if account_name.startswith(account_num + " ") or account_name == account_num:
+            return True
+
+    # Strategy 3 & 4: name-based fuzzy match
+    if account_name_budget:
+        a_lower = account_name.lower()
+        b_lower = account_name_budget.lower()
+        # Remove leading account numbers from budget name for cleaner comparison
+        b_clean = b_lower.lstrip("0123456789 ")
+        if b_clean and len(b_clean) >= 4:
+            if b_clean in a_lower or a_lower in b_lower:
+                return True
+
+    return False
 
 
 def _match_program(class_name: str, program_key: str) -> bool:
-    """True if the QBO class name contains the program key."""
-    if not class_name or not program_key:
+    """True if the QBO class name contains the program key (or is empty → accept all)."""
+    if not class_name:
+        # No class assigned — allow matching by account number alone (looser)
+        return True
+    if not program_key:
         return False
     # QBO class names are like "Programs:Small Business Growth:SBRC"
     # program_key is like "SBRC"
-    return program_key in class_name.upper()
+    # Also handle spaces vs underscores/dashes
+    class_upper = class_name.upper().replace("-", " ").replace("_", " ")
+    prog_upper = program_key.upper().replace("-", " ").replace("_", " ")
+    return prog_upper in class_upper
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +412,8 @@ async def preview_grant_tagging(
     changes: list[dict] = []
     already_correct: int = 0
     no_rule: int = 0
+    skipped_payroll: int = 0
+    pending_no_rule: list[dict] = []   # has Pending Allocations but couldn't match a rule
 
     for purchase in purchases:
         txn_id = purchase.get("Id", "")
@@ -349,16 +431,29 @@ async def preview_grant_tagging(
             account_name = detail["account_name"]
             class_name = detail["class_name"]
             current_customer_id = detail["customer_id"]
+            current_customer_name = detail["customer_name"]
+
+            # Skip payroll accounts
+            if _is_payroll_account(account_name):
+                skipped_payroll += 1
+                continue
 
             # Find matching rule
-            matched_rule = None
-            for (acct_num, prog_key), rule_info in rule_index.items():
-                if _match_account_num(account_name, acct_num) and _match_program(class_name, prog_key):
-                    matched_rule = rule_info
-                    break
+            matched_rule = _find_rule(account_name, class_name, rule_index)
 
             if not matched_rule:
                 no_rule += 1
+                # Even without a rule, flag Pending Allocations for manual attention
+                if _is_pending_allocation(current_customer_name):
+                    pending_no_rule.append({
+                        "purchase_id": txn_id,
+                        "txn_date": txn_date,
+                        "vendor": vendor,
+                        "account_name": account_name,
+                        "class_name": class_name,
+                        "amount": detail["amount"],
+                        "current_grant": current_customer_name or "(sin grant)",
+                    })
                 continue
 
             expected_customer_id = matched_rule.get("customer_id")
@@ -381,15 +476,18 @@ async def preview_grant_tagging(
                 "account_name": account_name,
                 "class_name": class_name,
                 "amount": detail["amount"],
-                "current_grant": detail["customer_name"] or "(none)",
+                "current_grant": current_customer_name or "(sin grant)",
                 "expected_grant": matched_rule["customer_display"] or matched_rule["grant_name"],
                 "expected_customer_id": expected_customer_id,
                 "grant_name": matched_rule["grant_name"],
+                "is_pending_allocation": _is_pending_allocation(current_customer_name),
             })
 
     logger.info(
-        "Preview: changes=%d already_correct=%d no_rule=%d multi_grant_lines=%d",
-        len(changes), already_correct, no_rule, len(multi_grant_lines)
+        "Preview: changes=%d already_correct=%d no_rule=%d pending_no_rule=%d "
+        "skipped_payroll=%d multi_grant_lines=%d",
+        len(changes), already_correct, no_rule, len(pending_no_rule),
+        skipped_payroll, len(multi_grant_lines),
     )
 
     return {
@@ -397,11 +495,14 @@ async def preview_grant_tagging(
             "changes_needed": len(changes),
             "already_correct": already_correct,
             "no_rule_found": no_rule,
+            "pending_no_rule": len(pending_no_rule),
+            "skipped_payroll": skipped_payroll,
             "multi_grant_lines": len(multi_grant_lines),
             "grants_in_excel": len(grants_map),
             "rules_parsed": len(tagging_rules),
         },
         "changes": sorted(changes, key=lambda x: (x["txn_date"], x["vendor"])),
+        "pending_no_rule": pending_no_rule[:100],   # capped to avoid huge payloads
         "multi_grant_lines": multi_grant_lines,
         "grants_resolved": [
             {
@@ -412,6 +513,98 @@ async def preview_grant_tagging(
             }
             for gname, ginfo in grants_map.items()
         ],
+    }
+
+
+@router.get("/tag/qbo-scan", summary="Scan QBO transactions — diagnostic view of accounts, classes and grants")
+async def qbo_scan(
+    realm_id: str = Query(...),
+    period_start: str = Query("2026-01-01"),
+    period_end: str = Query("2026-12-31"),
+    _: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Scan QBO expense transactions for the period and return:
+    - unique (account_name, class_name, customer_name) combinations
+    - breakdown by grant: how many lines have each CustomerRef
+    - how many lines have Pending Allocations or no grant
+
+    Use this endpoint to understand what data is in QBO before running the preview,
+    so you can verify that account names and class names match the Excel budget rules.
+    """
+    client = await get_qbo_client_for_realm(realm_id, db)
+
+    try:
+        purchases = await client.get_all_expenses(start_date=period_start, end_date=period_end)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"QBO expense fetch failed: {exc}") from exc
+
+    # Collect unique combinations
+    account_classes: dict[str, dict] = {}   # account_name → {count, classes, grants}
+    grant_counts: dict[str, int] = {}       # customer_name → count of lines
+    pending_lines: list[dict] = []
+    total_lines = 0
+
+    for purchase in purchases:
+        txn_id = purchase.get("Id", "")
+        txn_date = purchase.get("TxnDate", "")
+        vendor = (purchase.get("EntityRef") or {}).get("name", "")
+
+        for line in purchase.get("Line", []):
+            detail = _extract_line_detail(line)
+            if not detail or detail["amount"] <= 0:
+                continue
+            if _is_payroll_account(detail["account_name"]):
+                continue
+
+            total_lines += 1
+            acct = detail["account_name"] or "(no account)"
+            cls = detail["class_name"] or "(no class)"
+            cust = detail["customer_name"] or "(sin grant)"
+
+            # Aggregate by account
+            if acct not in account_classes:
+                account_classes[acct] = {"count": 0, "classes": set(), "grants": set()}
+            account_classes[acct]["count"] += 1
+            account_classes[acct]["classes"].add(cls)
+            account_classes[acct]["grants"].add(cust)
+
+            # Aggregate grants
+            grant_counts[cust] = grant_counts.get(cust, 0) + 1
+
+            # Flag pending
+            if _is_pending_allocation(detail["customer_name"]):
+                pending_lines.append({
+                    "purchase_id": txn_id,
+                    "txn_date": txn_date,
+                    "vendor": vendor,
+                    "account_name": acct,
+                    "class_name": cls,
+                    "amount": detail["amount"],
+                    "current_grant": cust,
+                })
+
+    # Sort accounts by count
+    accounts_summary = sorted(
+        [
+            {
+                "account_name": acct,
+                "line_count": info["count"],
+                "classes": sorted(info["classes"]),
+                "grants": sorted(info["grants"]),
+            }
+            for acct, info in account_classes.items()
+        ],
+        key=lambda x: -x["line_count"],
+    )
+
+    return {
+        "total_expense_lines": total_lines,
+        "pending_allocation_lines": len(pending_lines),
+        "grant_breakdown": dict(sorted(grant_counts.items(), key=lambda x: -x[1])),
+        "accounts_summary": accounts_summary,
+        "pending_lines": pending_lines[:200],
     }
 
 
