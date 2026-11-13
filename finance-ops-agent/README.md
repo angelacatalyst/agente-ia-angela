@@ -1,1 +1,0 @@
-# Finance Ops AI Manager
