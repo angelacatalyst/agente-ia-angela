@@ -49,3 +49,10 @@ uploads/
 dist/
 *.tar.gz
 *.zip
+
+# Secrets — never commit (Intuit Developer Terms: credentials only via the registered app)
+*.pem
+*.key
+*.db
+*.sqlite
+*tokens*.py

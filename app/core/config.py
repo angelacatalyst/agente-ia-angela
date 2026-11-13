@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     app_name: str = "Finance Ops AI Manager"
     app_version: str = "0.1.0"
     secret_key: str = "change-me-in-production-minimum-32-chars!!"
+    token_encryption_key: str = ""  # Fernet key for QuickBooks tokens at rest
     api_key_header: str = "X-API-Key"
 
     # Store as plain str — pydantic-settings won't JSON-decode plain strings
