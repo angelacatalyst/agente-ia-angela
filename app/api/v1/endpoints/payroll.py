@@ -674,7 +674,7 @@ GRANT_NAME_ALIASES: dict[str, str] = {
     "3010 Predevelopment Grant":     "3010 Predevelopment Grant",
     "Citi Community Progress Grant": "Citi- Community Progress Maker Grant",
     "City of Miami District 1 - MFE Funds":                          "City of Miami District 1 - MFE Funds ($200,000)",
-    "Miami-Dade County Office of the Mayor:MDC Mayor Cava":          "Miami-Dade County Office of the Mayor:MDC Mayor Cava ($89,000)",
+    "Miami-Dade County Office of the Mayor:MDC Mayor Cava":          "MDC Mayor Cava ($89,000)",
     "Truist Foundation":             "Truist Foundation ($100,000)",
     "B3 Living Cities 2026":         "B3- Living Cities 2026",
     "First Citizen Bank":            "First Citizen Bank ($20,000)",
