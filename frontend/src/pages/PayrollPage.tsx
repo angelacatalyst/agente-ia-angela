@@ -1333,7 +1333,7 @@ export function PayrollPage() {
                               <span key={g} className={cn('inline-flex items-center gap-1 text-[10px] font-medium rounded-full px-2 py-0.5 border',
                                 info.found ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200')}>
                                 {info.found ? <CheckCircle2 size={9} /> : <X size={9} />}
-                                {g}{info.found && info.qbo_name && info.qbo_name !== g ? ` → ${info.qbo_name}` : ''}
+                                {g.includes(':') ? g.split(':')[0] : g}{info.found && info.qbo_name ? ` → ${info.qbo_name}` : ''}
                               </span>
                             ))}
                           </div>
