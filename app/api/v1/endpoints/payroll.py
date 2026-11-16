@@ -179,9 +179,10 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 },
             },
         ],
-        # Pool 1 + Pool 2: same waterfall for all classes
+        # Pool 1: SBRC, La Oficina, Negocios, Capital Readiness
         #   Jan 1–Mar 31 2026: City of Miami District 1 - MFE Funds
         #   Apr 1–Dec 31 2026: MDC Mayor Cava
+        # Pool 2: Smithsonian + Festival del Platano → grant TBD → Pending Allocations
         "grant_rules": [
             {
                 "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
@@ -192,10 +193,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             },
             {
                 "pool_classes": ["Smithsonian", "Festival del Platano"],
-                "waterfall": [
-                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00, "end_date": "2026-03-31"},
-                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 71200.00, "start_date": "2026-04-01"},
-                ],
+                "waterfall": [],   # Grant TBD → goes to Pending Allocations Grant
             },
         ],
         "dental_vision_employer": 0.00,
@@ -238,7 +236,7 @@ ALLOCATION_MATRIX: dict[str, dict] = {
             {
                 "pool_classes": ["SBRC", "Negocios", "Capital Readiness"],
                 "waterfall": [
-                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 12000.00, "start_date": "2026-05-01", "end_date": "2026-09-30"},
+                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 89000.00, "start_date": "2026-05-01", "end_date": "2026-09-30"},
                     {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00, "start_date": "2026-10-01"},
                 ],
             },
