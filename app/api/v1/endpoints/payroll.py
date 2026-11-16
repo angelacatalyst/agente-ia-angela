@@ -179,20 +179,23 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 },
             },
         ],
-        # Pool 1: Mayor Cava (Apr 2026+) covers SBRC, La Oficina, Negocios, Capital Readiness
-        #          then City of Miami MFE takes over if Mayor Cava runs out
-        # Pool 2: Smithsonian + Festival del Platano → City of Miami MFE only (Mayor Cava does NOT apply)
+        # Pool 1 + Pool 2: same waterfall for all classes
+        #   Jan 1–Mar 31 2026: City of Miami District 1 - MFE Funds
+        #   Apr 1–Dec 31 2026: MDC Mayor Cava
         "grant_rules": [
             {
                 "pool_classes": ["SBRC", "La Oficina", "Negocios", "Capital Readiness"],
                 "waterfall": [
+                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00, "end_date": "2026-03-31"},
                     {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 71200.00, "start_date": "2026-04-01"},
-                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00},
                 ],
             },
             {
                 "pool_classes": ["Smithsonian", "Festival del Platano"],
-                "waterfall": [],   # No grant assigned → goes to Pending Allocations Grant
+                "waterfall": [
+                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00, "end_date": "2026-03-31"},
+                    {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 71200.00, "start_date": "2026-04-01"},
+                ],
             },
         ],
         "dental_vision_employer": 0.00,
@@ -227,15 +230,16 @@ ALLOCATION_MATRIX: dict[str, dict] = {
                 },
             },
         ],
-        # Pool 1: Mayor Cava (May–Sep 2026) covers SBRC, Negocios, Capital Readiness
-        #          From Oct 2026 onward Mayor Cava ends → Truist Foundation covers these classes
-        # Pool 2: ILB, CPA, Tradicion en Accion → Truist Foundation only (Mayor Cava does NOT apply)
+        # Pool 1: Mayor Cava (May 1–Sep 30 2026) covers SBRC, Negocios, Capital Readiness
+        #          Oct 1–Dec 31 2026: City of Miami District 1 - MFE Funds takes over
+        #          Jan–Apr 2026: no grant assigned → Pending Allocations
+        # Pool 2: ILB, CPA, Tradicion en Accion → Truist Foundation (unchanged)
         "grant_rules": [
             {
                 "pool_classes": ["SBRC", "Negocios", "Capital Readiness"],
                 "waterfall": [
                     {"name": "Miami-Dade County Office of the Mayor:MDC Mayor Cava", "annual_budget": 12000.00, "start_date": "2026-05-01", "end_date": "2026-09-30"},
-                    {"name": "Truist Foundation", "annual_budget": 100000.00},
+                    {"name": "City of Miami District 1 - MFE Funds", "annual_budget": 200000.00, "start_date": "2026-10-01"},
                 ],
             },
             {
